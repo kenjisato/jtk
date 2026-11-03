@@ -1,0 +1,21 @@
+[project]
+name = "jtk"
+version = "0.1.0"
+description = "授業の成績・名簿まわりの小さな道具"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "typer",
+    "openpyxl",
+    "keyring",
+]
+
+[project.scripts]
+jtk = "jtk.cli:app"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
