@@ -11,7 +11,7 @@ from jtk.crypto import (
 from jtk.errors import JtkError
 
 MASTER = bytes(range(32))
-MASTER_TEXT = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+from conftest import MASTER_TEXT
 SCOPE = "2026後期/経済数学I"
 
 
