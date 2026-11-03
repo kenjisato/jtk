@@ -108,3 +108,22 @@ def test_broken_xlsx_message_has_no_content(tmp_path):
         read_table(p)
     assert "secret-value" not in str(e.value)
     assert "a.xlsx" in str(e.value)
+
+
+def test_xlsx_formula_like_strings_stay_literal(tmp_path):
+    t = Table(["h"], [["=x+1"], ["=SUM(A1)"]], [2, 3])
+    p = tmp_path / "a.xlsx"
+    write_table(t, p)
+    back, _ = read_table(p)
+    assert back.rows == [["=x+1"], ["=SUM(A1)"]]
+    ws = load_workbook(p).active
+    assert ws["A2"].data_type == "s"
+    assert ws["A3"].data_type == "s"
+
+
+def test_write_failure_message_has_no_content(tmp_path):
+    t = Table(["h"], [["secretvalue"]], [2])
+    with pytest.raises(JtkError) as e:
+        write_table(t, tmp_path / "a.xlsx")
+    assert "secret" not in str(e.value)
+    assert "a.xlsx" in str(e.value)

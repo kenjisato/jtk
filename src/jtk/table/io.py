@@ -78,19 +78,34 @@ def read_table(path: Path) -> tuple[Table, list[str]]:
         raise JtkError(f"{path.name} を表として読めません") from None
 
 
-def write_table(table: Table, path: Path) -> None:
-    path = Path(path)
-    if _suffix(path) == ".csv":
-        with path.open("w", encoding="utf-8-sig", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(table.headers)
-            w.writerows(table.rows)
-        return
+def _write_csv(table: Table, path: Path) -> None:
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(table.headers)
+        w.writerows(table.rows)
+
+
+def _write_xlsx(table: Table, path: Path) -> None:
     wb = Workbook()
     ws = wb.active
     if table.sheet_title is not None:
         ws.title = table.sheet_title
-    ws.append(table.headers)
-    for row in table.rows:
-        ws.append(row)
+    for r, row in enumerate([table.headers, *table.rows], start=1):
+        for c, value in enumerate(row, start=1):
+            cell = ws.cell(row=r, column=c, value=value)
+            if isinstance(value, str):
+                cell.data_type = "s"  # "=" で始まる文字列も数式にしない
     wb.save(path)
+
+
+def write_table(table: Table, path: Path) -> None:
+    path = Path(path)
+    suffix = _suffix(path)
+    try:
+        if suffix == ".csv":
+            _write_csv(table, path)
+        else:
+            _write_xlsx(table, path)
+    except Exception:
+        # 例外の本文にセルの値が入ることがあるので連結しない
+        raise JtkError(f"{path.name} に書き込めません") from None
