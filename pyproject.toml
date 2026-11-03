@@ -3,6 +3,7 @@ name = "jtk"
 version = "0.1.0"
 description = "授業の成績・名簿まわりの小さな道具"
 license = "MIT"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "typer",
