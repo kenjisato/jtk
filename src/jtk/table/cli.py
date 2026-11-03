@@ -1,5 +1,6 @@
 """`jtk table pii drop / hash` コマンド。"""
 
+import errno
 import os
 import shutil
 from pathlib import Path
@@ -62,7 +63,10 @@ def _write_atomic(table, out: Path) -> None:
         raise JtkError(f"{out.parent.name} を作れません") from None
     tmp = out.parent / f".{out.stem}.jtk-tmp{out.suffix}"
     try:
-        write_table(table, tmp)
+        try:
+            write_table(table, tmp)
+        except JtkError:
+            raise JtkError(f"{out.name} に書き込めません") from None
         os.replace(tmp, out)
     except JtkError:
         raise
@@ -72,12 +76,30 @@ def _write_atomic(table, out: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def _move_across_devices(inp: Path, moved: Path) -> None:
+    """別のドライブへは複写してから消す。消せなければ複写も消す。"""
+    tmp = moved.parent / f".{moved.name}.jtk-tmp"
+    try:
+        shutil.copy2(inp, tmp)
+        inp.unlink()
+        try:
+            os.replace(tmp, moved)
+        except OSError:
+            shutil.copy2(tmp, inp)  # 原本を失わない
+            raise
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def _move_original(inp: Path, moved: Path, out: Path) -> None:
     try:
         moved.parent.mkdir(parents=True, exist_ok=True)
-        if moved.exists():
-            moved.unlink()
-        shutil.move(inp, moved)
+        try:
+            os.replace(inp, moved)
+        except OSError as e:
+            if e.errno != errno.EXDEV:
+                raise
+            _move_across_devices(inp, moved)
     except Exception:
         out.unlink(missing_ok=True)
         raise JtkError(

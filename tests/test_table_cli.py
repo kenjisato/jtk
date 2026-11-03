@@ -1,3 +1,5 @@
+import errno
+import os
 from datetime import datetime
 
 import pytest
@@ -27,9 +29,11 @@ def sheet(path):
     return [list(r) for r in rows]
 
 
-def assert_untouched(inp, out):
+def assert_untouched(inp, out, before=None):
     assert not out.exists()
     assert inp.exists()
+    if before is not None:
+        assert inp.read_bytes() == before
     assert list(out.parent.glob(".*")) == []
 
 
@@ -85,7 +89,12 @@ def test_hash_msforms_csv(forms_csv, master_key, tmp_path):
     assert out.read_bytes()[:3] == b"\xef\xbb\xbf"
     t, _ = read_table(out)
     assert t.headers == ["ID", "Start time", "Completion time", "hash", "Q1"]
-    assert [row[3] for row in t.rows] == [TARO, t.rows[1][3], TARO]
+    sk = derive_scope_key(decode_master_key(MASTER_TEXT), SCOPE)
+    assert [row[3] for row in t.rows] == [TARO, hash_email(sk, "Hanako@Example.com"), TARO]
+    for row, src in zip(t.rows, _default_forms_rows()):
+        assert [row[0], row[1], row[2], row[4]] == [
+            str(src[0]), src[1].isoformat(sep=" "), src[2].isoformat(sep=" "), src[5]
+        ]
 
 
 def test_same_person_across_files_and_scopes(forms_xlsx, master_key, tmp_path):
@@ -142,18 +151,86 @@ def test_move_original(forms_xlsx, tmp_path):
     assert str(moved) in r.output
 
 
-def test_move_failure_removes_output(forms_xlsx, tmp_path, monkeypatch):
-    def boom(*a, **k):
-        raise PermissionError("locked")
+def _patch_replace(monkeypatch, when, exc):
+    real = os.replace
 
-    monkeypatch.setattr("shutil.move", boom)
+    def fake(src, dst, *a, **k):
+        if when(os.fspath(src), os.fspath(dst)):
+            raise exc
+        return real(src, dst, *a, **k)
+
+    monkeypatch.setattr(os, "replace", fake)
+
+
+def test_move_failure_removes_output(forms_xlsx, tmp_path, monkeypatch):
     inp = forms_xlsx()
+    before = inp.read_bytes()
     out = tmp_path / "o.xlsx"
-    r = run("drop", inp, "--preset", "msforms", "--out", out,
-            "--move-original", tmp_path / "m" / "forms.xlsx")
+    moved = tmp_path / "m" / "forms.xlsx"
+    _patch_replace(monkeypatch, lambda s, d: s == os.fspath(inp), PermissionError("locked"))
+    r = run("drop", inp, "--preset", "msforms", "--out", out, "--move-original", moved)
     assert r.exit_code == 1
     assert "原本を移せませんでした" in r.output
-    assert_untouched(inp, out)
+    assert_untouched(inp, out, before)
+    assert not moved.exists()
+    assert list(moved.parent.glob("*")) == []
+
+
+def test_move_failure_keeps_existing_target_with_force(forms_xlsx, tmp_path, monkeypatch):
+    inp = forms_xlsx()
+    before = inp.read_bytes()
+    out = tmp_path / "o.xlsx"
+    moved = tmp_path / "m" / "forms.xlsx"
+    moved.parent.mkdir()
+    moved.write_bytes(b"old")
+    _patch_replace(monkeypatch, lambda s, d: s == os.fspath(inp), PermissionError("locked"))
+    r = run("drop", inp, "--preset", "msforms", "--out", out,
+            "--move-original", moved, "--force")
+    assert r.exit_code == 1
+    assert_untouched(inp, out, before)
+    assert moved.read_bytes() == b"old"
+
+
+def test_move_across_devices_leaves_no_copy_when_delete_fails(forms_xlsx, tmp_path, monkeypatch):
+    inp = forms_xlsx()
+    before = inp.read_bytes()
+    out = tmp_path / "o.xlsx"
+    moved = tmp_path / "m" / "forms.xlsx"
+    _patch_replace(monkeypatch, lambda s, d: s == os.fspath(inp), OSError(errno.EXDEV, "xdev"))
+    real_unlink = type(inp).unlink
+
+    def fake_unlink(self, *a, **k):
+        if self == inp:
+            raise PermissionError("locked")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(type(inp), "unlink", fake_unlink)
+    r = run("drop", inp, "--preset", "msforms", "--out", out, "--move-original", moved)
+    assert r.exit_code == 1
+    assert_untouched(inp, out, before)
+    assert list(moved.parent.glob("*")) == [] and not moved.exists()
+
+
+def test_move_across_devices_succeeds(forms_xlsx, tmp_path, monkeypatch):
+    inp = forms_xlsx()
+    before = inp.read_bytes()
+    out = tmp_path / "o.xlsx"
+    moved = tmp_path / "m" / "forms.xlsx"
+    _patch_replace(monkeypatch, lambda s, d: s == os.fspath(inp), OSError(errno.EXDEV, "xdev"))
+    r = run("drop", inp, "--preset", "msforms", "--out", out, "--move-original", moved)
+    assert r.exit_code == 0, r.output
+    assert moved.read_bytes() == before and not inp.exists() and out.exists()
+
+
+def test_final_write_failure_leaves_nothing(forms_xlsx, tmp_path, monkeypatch):
+    inp = forms_xlsx()
+    before = inp.read_bytes()
+    out = tmp_path / "o.xlsx"
+    _patch_replace(monkeypatch, lambda s, d: d == os.fspath(out), OSError("disk"))
+    r = run("drop", inp, "--preset", "msforms", "--out", out)
+    assert r.exit_code == 1
+    assert "o.xlsx" in r.output and "jtk-tmp" not in r.output
+    assert_untouched(inp, out, before)
 
 
 def test_existing_out_requires_force(forms_xlsx, tmp_path):
@@ -214,7 +291,8 @@ def test_hash_scope_required(forms_xlsx, master_key, tmp_path):
     inp = forms_xlsx()
     out = tmp_path / "o.xlsx"
     r = run("hash", inp, "--preset", "msforms", "--out", out)
-    assert r.exit_code != 0
+    assert r.exit_code == 1
+    assert "scope" in r.output
     assert_untouched(inp, out)
 
 
@@ -244,7 +322,7 @@ def test_empty_hash_cell_writes_nothing(forms_xlsx, master_key, tmp_path):
     out = tmp_path / "o.xlsx"
     r = run("hash", inp, "--preset", "msforms", "--scope", SCOPE, "--out", out)
     assert r.exit_code == 1
-    assert "3" in r.output
+    assert "行 3" in r.output
     assert_untouched(inp, out)
 
 
