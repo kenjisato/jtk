@@ -32,6 +32,7 @@ def test_set_reads_hidden_input(fake_keyring):
 def test_set_rejects_bad_format(fake_keyring):
     r = runner.invoke(app, ["key", "set"], input="not-a-key\n")
     assert r.exit_code == 1 and fake_keyring.get_password("jtk", "master") is None
+    assert "not-a-key" not in r.output
 
 
 def test_set_requires_force_when_key_exists(fake_keyring):

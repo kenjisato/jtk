@@ -72,7 +72,7 @@ def resolve_roles(
         raise JtkError("消す列が指定されていません")
 
     claimed: set[str] = set()
-    for cols in ([hash_col] if hash_col else [], pii_cols, omit_cols):
+    for cols in ([hash_col] if hash_col is not None else [], pii_cols, omit_cols):
         for col in cols:
             if col not in headers:
                 raise JtkError(f"列 {col} が見出しにありません")

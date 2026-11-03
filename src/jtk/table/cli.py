@@ -24,7 +24,7 @@ app = typer.Typer(help="表の道具", pretty_exceptions_enable=False)
 pii_app = typer.Typer(help="個人情報の列を消す・ハッシュに置き換える", pretty_exceptions_enable=False)
 app.add_typer(pii_app, name="pii")
 
-Input = Annotated[Path, typer.Argument(help="入力の表（.xlsx / .csv）")]
+Input = Annotated[Path, typer.Argument(metavar="INPUT", help="入力の表（.xlsx / .csv）")]
 Config = Annotated[Optional[Path], typer.Option("--config", help="設定ファイル（TOML）")]
 Out = Annotated[Optional[Path], typer.Option("--out", help="出力先")]
 Preset = Annotated[Optional[str], typer.Option("--preset", help="列の組（msforms）")]
@@ -73,7 +73,10 @@ def _write_atomic(table, out: Path) -> None:
     except OSError:
         raise JtkError(f"{out.name} に書き込めません") from None
     finally:
-        tmp.unlink(missing_ok=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _discard(tmp: Path) -> None:

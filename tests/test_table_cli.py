@@ -142,6 +142,16 @@ def test_hash_without_key_writes_nothing(forms_xlsx, fake_keyring, tmp_path):
     assert_untouched(inp, out)
 
 
+def test_hash_with_broken_keyring_writes_nothing(forms_xlsx, broken_keyring, tmp_path):
+    inp = forms_xlsx()
+    before = inp.read_bytes()
+    out = tmp_path / "o.xlsx"
+    r = run("hash", inp, "--preset", "msforms", "--scope", SCOPE, "--out", out)
+    assert r.exit_code == 1
+    assert "jtk key set" in r.output
+    assert_untouched(inp, out, before)
+
+
 def test_move_original(forms_xlsx, tmp_path):
     inp = forms_xlsx()
     out = tmp_path / "o.xlsx"
@@ -406,14 +416,41 @@ def cfg(tmp_path, forms_xlsx):
 
 def test_config_only_hash(cfg, master_key, monkeypatch):
     path, inp, course, elsewhere = cfg
+    path.write_text(CONFIG + 'hash_column = "h"\n', encoding="utf-8")
     monkeypatch.chdir(elsewhere)
     r = run("hash", inp, "--config", path)
     assert r.exit_code == 0, r.output
     out = course / "analysis" / "forms" / "forms_pii.xlsx"
-    assert sheet(out)[1][3] == TARO
+    got = sheet(out)
+    assert got[0][3] == "h"
+    sk = derive_scope_key(decode_master_key(MASTER_TEXT), SCOPE)
+    assert [g[3] for g in got[1:]] == [TARO, hash_email(sk, "Hanako@Example.com"), TARO]
     assert not inp.exists()
     assert (course / "private" / "forms" / "forms.xlsx").exists()
     assert str(path) in r.output
+
+
+def test_stem_mismatch_writes_nothing(forms_xlsx, tmp_path):
+    course = tmp_path / "course"
+    course.mkdir()
+    path = course / "jtk.toml"
+    path.write_text(
+        "[jtk.table.pii]\n"
+        'preset = "msforms"\n'
+        'out_dir = "analysis"\n'
+        "stem_pattern = '^[0-9]+-[0-9]+ .*$'\n"
+        "stem_replace = 'x'\n"
+        'move_original_dir = "private"\n',
+        encoding="utf-8",
+    )
+    inp = forms_xlsx(name="other.xlsx", directory=tmp_path / "inbox")
+    before = inp.read_bytes()
+    r = run("drop", inp, "--config", path)
+    assert r.exit_code == 1
+    assert "stem_pattern" in r.output
+    assert_untouched(inp, course / "analysis" / "other.xlsx", before)
+    assert not (course / "analysis").exists()
+    assert not (course / "private").exists()
 
 
 def test_config_only_drop_ignores_scope(cfg, broken_keyring, monkeypatch):

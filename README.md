@@ -70,7 +70,7 @@ jtk table pii hash "03-2 確率の復習.xlsx" --preset msforms --scope "2026後
 | `jtk key set` | Bitwarden の親鍵を入力欄（画面に出ない）で受け取り、この PC の鍵保管庫に入れる。2 台目以降で使う。既にあれば `--force` が要る |
 | `jtk key fingerprint` | 親鍵の指紋（8 桁）を表示する |
 
-PC ごとに `jtk key fingerprint` を実行し、Bitwarden のメモの指紋と一致することを確かめてください。鍵が食い違うと、ハッシュ値が黙って食い違います。`jtk key new` と `jtk key set` の出力は鍵を含むので、AI の会話の中では実行しないでください。
+PC ごとに `jtk key fingerprint` を実行し、Bitwarden のメモの指紋と一致することを確かめてください。鍵が食い違うと、ハッシュ値が黙って食い違います。`jtk key new` の出力と `jtk key set` への入力は鍵を含むので、AI の会話の中では実行しないでください。
 
 ## 設定ファイル
 
@@ -119,6 +119,7 @@ stem_replace = '\1'
 
 - `--out`・`--move-original`・`--scope`・`--preset`・`--hash`・`--hash-column` は、コマンドラインの指定が優先します
 - `--pii`・`--omit` は、設定ファイルの分に追加します
+- 設定ファイルに `preset` があると、コマンドラインの `--hash` は併用できません（「--preset と --hash は同時に指定できません」で止まります）。`--hash` を使うなら、設定ファイルから `preset` を外してください
 - `--out` は、設定ファイルに `out_dir` があれば省けます。`--scope` も同じで、設定ファイルに `scope` があれば省けます
 - `--force` は設定ファイルに置けません。上書きは毎回その場で決めます
 

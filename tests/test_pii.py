@@ -58,6 +58,11 @@ def test_hash_mode_without_hash_error():
         roles(EN, preset=None)
 
 
+def test_empty_hash_column_name_is_validated():
+    with pytest.raises(JtkError):
+        roles(EN, preset=None, hash_cols=[""])
+
+
 def test_two_hash_cols_error():
     with pytest.raises(JtkError):
         roles(EN, preset=None, hash_cols=["Email", "Name"])
