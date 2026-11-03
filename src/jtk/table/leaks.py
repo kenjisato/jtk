@@ -39,8 +39,9 @@ def collect_needles(original: Table, roles: Roles) -> dict[str, str]:
                 continue
             text = str(cell)
             add(text, f"{column} の値")
-            if "@" in text:
-                add(text.split("@", 1)[0], f"{column} の @ より前")
+            folded = unicodedata.normalize("NFKC", text)
+            if "@" in folded:
+                add(folded.split("@", 1)[0], f"{column} の @ より前")
     return needles
 
 

@@ -38,9 +38,14 @@ def test_digits_only_needle_is_searched():
 def test_pii_email_column_in_drop_mode():
     original = table(["Email", "Name"], [["s1234567@example.jp", "架空 太郎"]])
     needles = collect_needles(original, Roles(None, ["Email", "Name"], []))
+    assert needles == {
+        "s1234567@example.jp": "Email の値",
+        "s1234567": "Email の @ より前",
+        "架空太郎": "Name の値",
+    }
     output = table(["Q1"], [["s1234567@example.jp"]])
     kinds = {leak.kind for leak in find_leaks(output, needles, set())}
-    assert {"Email の値", "Email の @ より前", EMAIL_KIND} <= kinds
+    assert kinds == {"Email の値", "Email の @ より前", EMAIL_KIND}
 
 
 def test_short_needle_skipped():
@@ -73,6 +78,32 @@ def test_clean_table_has_no_leaks():
 
 
 def test_one_leak_per_cell_and_kind():
-    needles = {"taro1234": "Email の @ より前"}
-    output = table(["Q1"], [["taro1234 taro1234"]])
-    assert len(find_leaks(output, needles, set())) == 1
+    needles = {"taro1234": "Email の @ より前", "hana5678": "Email の @ より前"}
+    output = table(["Q1"], [["taro1234 と hana5678"]])
+    assert find_leaks(output, needles, set()) == [Leak(2, "Q1", "Email の @ より前")]
+
+
+def test_fullwidth_at_gives_local_part_needle():
+    original = table(["Email"], [["ｓ1234567＠example.jp"]])
+    needles = collect_needles(original, Roles("Email", [], []))
+    assert needles["s1234567"] == "Email の @ より前"
+
+
+def test_needle_length_boundaries():
+    original = table(["Name", "Email"], [["李 太郎", "ab@example.jp"], ["abcd", "x"]])
+    needles = collect_needles(original, Roles(None, ["Name", "Email"], []))
+    assert "李太郎" not in needles
+    assert "ab" not in needles
+    assert needles["ab@example.jp"] == "Email の値"
+    assert needles["abcd"] == "Name の値"
+
+
+def test_none_and_blank_cells_make_no_needle():
+    original = table(["Name"], [[None], [""], ["   "]])
+    assert collect_needles(original, Roles(None, ["Name"], [])) == {}
+
+
+def test_first_kind_wins_hash_column_first():
+    original = table(["Email", "Name"], [["abcd1234", "abcd1234"]])
+    needles = collect_needles(original, Roles("Email", ["Name"], []))
+    assert needles == {"abcd1234": "Email の値"}
