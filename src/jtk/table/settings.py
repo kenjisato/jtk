@@ -68,7 +68,7 @@ def load_pii_settings(path: Path) -> PiiSettings:
     s.pii = list(node.get("pii", []))
     s.omit = list(node.get("omit", []))
 
-    base = path.resolve().parent
+    base = path.absolute().parent
     if "out_dir" in node:
         s.out_dir = (base / node["out_dir"]).resolve()
     if "move_original_dir" in node:

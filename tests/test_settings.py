@@ -1,3 +1,4 @@
+import os
 import unicodedata
 
 import pytest
@@ -177,3 +178,25 @@ def test_moved_original_path(tmp_path):
     s = load_pii_settings(cfg)
     assert moved_original_path(s, tmp_path / "x" / "第3回 小テスト.xlsx") == s.move_original_dir / "第3回 小テスト.xlsx"
     assert moved_original_path(load_pii_settings(pii_cfg(tmp_path, "")), tmp_path / "a.xlsx") is None
+
+
+def test_symlinked_config_resolves_against_link_directory(tmp_path):
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    target = real / "real.toml"
+    target.write_text('[jtk.table.pii]\nout_dir = "o"\n', encoding="utf-8")
+    course = tmp_path / "course"
+    course.mkdir()
+    link = course / "jtk.toml"
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink を作れない環境")
+    assert load_pii_settings(link).out_dir == (course / "o").resolve()
+
+
+@pytest.mark.parametrize("repl", ["a/b", "a" + chr(92) * 2 + "b"])
+def test_stem_separator_in_result_error(repl, tmp_path):
+    s = settings_with(tmp_path, f"stem_pattern = '^(.*)$'\nstem_replace = '{repl}'\n")
+    with pytest.raises(JtkError):
+        output_path(s, tmp_path / "a.xlsx")
