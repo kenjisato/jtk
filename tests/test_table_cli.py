@@ -1,5 +1,6 @@
 import errno
 import os
+import shutil
 from datetime import datetime
 
 import pytest
@@ -209,6 +210,59 @@ def test_move_across_devices_leaves_no_copy_when_delete_fails(forms_xlsx, tmp_pa
     assert r.exit_code == 1
     assert_untouched(inp, out, before)
     assert list(moved.parent.glob("*")) == [] and not moved.exists()
+
+
+def _xdev_with_failing_final_replace(monkeypatch, inp, moved):
+    def when(s, d):
+        return s == os.fspath(inp) or (s.endswith(".jtk-tmp") and d == os.fspath(moved))
+
+    def exc_for(s):
+        return OSError(errno.EXDEV, "xdev") if s == os.fspath(inp) else PermissionError("x")
+
+    real = os.replace
+
+    def fake(src, dst, *a, **k):
+        if when(os.fspath(src), os.fspath(dst)):
+            raise exc_for(os.fspath(src))
+        return real(src, dst, *a, **k)
+
+    monkeypatch.setattr(os, "replace", fake)
+
+
+def test_move_across_devices_restores_original_when_final_replace_fails(
+    forms_xlsx, tmp_path, monkeypatch
+):
+    inp = forms_xlsx()
+    before = inp.read_bytes()
+    out = tmp_path / "o.xlsx"
+    moved = tmp_path / "m" / "forms.xlsx"
+    _xdev_with_failing_final_replace(monkeypatch, inp, moved)
+    r = run("drop", inp, "--preset", "msforms", "--out", out, "--move-original", moved)
+    assert r.exit_code == 1
+    assert_untouched(inp, out, before)
+    assert list(moved.parent.glob("*")) == [] and not moved.exists()
+
+
+def test_move_across_devices_keeps_temp_when_restore_fails(forms_xlsx, tmp_path, monkeypatch):
+    inp = forms_xlsx()
+    before = inp.read_bytes()
+    out = tmp_path / "o.xlsx"
+    moved = tmp_path / "m" / "forms.xlsx"
+    _xdev_with_failing_final_replace(monkeypatch, inp, moved)
+    real_copy2 = shutil.copy2
+
+    def fake_copy2(src, dst, *a, **k):
+        if os.fspath(dst) == os.fspath(inp):
+            raise PermissionError("locked")
+        return real_copy2(src, dst, *a, **k)
+
+    monkeypatch.setattr(shutil, "copy2", fake_copy2)
+    r = run("drop", inp, "--preset", "msforms", "--out", out, "--move-original", moved)
+    assert r.exit_code == 1
+    kept = list(moved.parent.glob(".*"))
+    assert len(kept) == 1 and kept[0].read_bytes() == before
+    assert str(kept[0]) in r.output
+    assert not out.exists() and not inp.exists()
 
 
 def test_move_across_devices_succeeds(forms_xlsx, tmp_path, monkeypatch):

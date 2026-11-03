@@ -76,19 +76,45 @@ def _write_atomic(table, out: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def _discard(tmp: Path) -> None:
+    """一時ファイルを消す。消せなければ、残った場所を知らせる。"""
+    try:
+        tmp.unlink(missing_ok=True)
+    except OSError:
+        raise JtkError(
+            f"一時ファイル {tmp} を消せませんでした。個人情報が入っているので手で消してください。"
+        ) from None
+
+
 def _move_across_devices(inp: Path, moved: Path) -> None:
-    """別のドライブへは複写してから消す。消せなければ複写も消す。"""
+    """別のドライブへは複写してから消す。最後の 1 部は消さない。"""
     tmp = moved.parent / f".{moved.name}.jtk-tmp"
     try:
         shutil.copy2(inp, tmp)
         inp.unlink()
-        try:
-            os.replace(tmp, moved)
-        except OSError:
-            shutil.copy2(tmp, inp)  # 原本を失わない
-            raise
-    finally:
-        tmp.unlink(missing_ok=True)
+    except Exception:
+        _discard(tmp)
+        raise
+    try:
+        os.replace(tmp, moved)
+        return
+    except OSError:
+        pass
+    # 原本は消えている。戻せたと確かめられるまで tmp を消さない。
+    try:
+        size = tmp.stat().st_size
+        shutil.copy2(tmp, inp)
+        restored = inp.stat().st_size == size
+    except Exception:
+        restored = False
+    if not restored:
+        raise JtkError(
+            "原本を移せず、元の場所へも戻せませんでした。"
+            f"原本の内容は一時ファイル {tmp} に残してあります（消さないでください）。"
+            "出力は消しました。"
+        ) from None
+    _discard(tmp)
+    raise OSError
 
 
 def _move_original(inp: Path, moved: Path, out: Path) -> None:
@@ -100,6 +126,9 @@ def _move_original(inp: Path, moved: Path, out: Path) -> None:
             if e.errno != errno.EXDEV:
                 raise
             _move_across_devices(inp, moved)
+    except JtkError:
+        out.unlink(missing_ok=True)
+        raise
     except Exception:
         out.unlink(missing_ok=True)
         raise JtkError(
