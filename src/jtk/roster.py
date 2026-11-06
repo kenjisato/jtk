@@ -8,7 +8,12 @@ from pathlib import Path
 from jtk.crypto import hash_email, normalize_email
 from jtk.errors import JtkError
 from jtk.table import Table
-from jtk.table.secure_io import read_encrypted_xlsx, write_encrypted_xlsx
+from jtk.table.secure_io import (
+    read_encrypted_workbook,
+    read_encrypted_xlsx,
+    write_encrypted_workbook,
+    write_encrypted_xlsx,
+)
 
 COLUMNS = ["学年", "姓", "名", "メールアドレス", "別表記", "呼称", "ID"]
 
@@ -134,3 +139,29 @@ def fill_ids(table: Table, scope_key: bytes) -> list[str]:
 def save_roster(table: Table, path: Path, password: str) -> None:
     """対応表を暗号化して保存する。失敗しても元のファイルは変わらない。"""
     write_encrypted_xlsx(table, path, password)
+
+
+def fill_roster_file(path: Path, password: str, scope_key: bytes) -> list[str]:
+    """暗号化された対応表の ID の空欄を埋めて上書きし、入れた ID を返す。
+
+    最初のシートの ID のセルだけを書き換え、ほかのシート・書式・数式・空行・コメントは残す。
+    埋める行が無ければ、ファイルは書き直さない。
+    """
+    table, workbook = read_encrypted_workbook(path, password)
+    try:
+        id_col = roster_column_indices(table.headers)["ID"]
+        before = [cells[id_col] for cells in table.rows]
+        filled = fill_ids(table, scope_key)
+        if not filled:
+            return filled
+        ws = workbook.worksheets[0]
+        for old, cells, row in zip(before, table.rows, table.row_numbers):
+            if cells[id_col] == old:
+                continue
+            cell = ws.cell(row=row, column=id_col + 1)
+            cell.value = str(cells[id_col])
+            cell.data_type = "s"
+        write_encrypted_workbook(workbook, path, password)
+        return filled
+    finally:
+        workbook.close()

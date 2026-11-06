@@ -15,7 +15,6 @@ from jtk.guard import verify_guard
 from jtk.table.io import read_table, write_table
 from jtk.table.leaks import collect_needles, find_leaks
 from jtk.table.pii import resolve_roles, transform
-from jtk.table.secure_io import read_encrypted_xlsx
 from jtk.table.settings import (
     PiiSettings,
     load_pii_settings,
@@ -275,10 +274,7 @@ def fill(
     master = keys.load_master_key()
     scope_key = crypto.derive_scope_key(master, scope)
     password = roster_mod.prompt_password()
-    table = read_encrypted_xlsx(roster, password)
-    filled = roster_mod.fill_ids(table, scope_key)
-    if filled:
-        roster_mod.save_roster(table, roster, password)
+    filled = roster_mod.fill_roster_file(roster, password, scope_key)
     typer.echo(f"埋めた件数: {len(filled)} 件")
     for id_ in filled:
         typer.echo(f"  {id_}")
