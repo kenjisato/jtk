@@ -1,6 +1,6 @@
 [project]
 name = "jtk"
-version = "0.1.0"
+version = "0.2.0"
 description = "授業の成績・名簿まわりの小さな道具"
 license = "MIT"
 readme = "README.md"
@@ -9,6 +9,7 @@ dependencies = [
     "typer",
     "openpyxl",
     "keyring",
+    "msoffcrypto-tool>=5.1",
 ]
 
 [project.scripts]
