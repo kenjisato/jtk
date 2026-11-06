@@ -110,7 +110,7 @@ AI（Claude Code）が対応表や原本のフォルダを読まないように�
 ```toml
 [jtk.guard]
 paths = ["_inbox/**", "private/**"]
-command_words = ["_inbox/", "_inbox\\", "private/", "private\\"]
+command_words = ["_inbox", "private", "student-ids", ".docx", ".pdf", "--danger"]
 ```
 
 - `paths` は、守るファイルのパターンです。`.claude` のあるフォルダを起点に、`/` 区切りで書きます。`*` は 1 階層内、`**` は階層をまたぎます。Read / Edit / Write / MultiEdit / NotebookEdit が触るファイル、Grep / Glob の検索先がこれに当たると拒みます
@@ -120,7 +120,7 @@ command_words = ["_inbox/", "_inbox\\", "private/", "private\\"]
 
 ### フックの登録
 
-プロジェクトの `.claude/settings.json` に書きます。コマンドは、jtk が見つからないときに通してしまわず、止める（終了コード 2）形にしてください。
+プロジェクトの `.claude/settings.json` に書きます。コマンドは、jtk が見つからないときや jtk 自体が壊れて落ちたときに通してしまわず、止める（終了コード 2）形にしてください。
 
 ```json
 {
@@ -131,7 +131,7 @@ command_words = ["_inbox/", "_inbox\\", "private/", "private\\"]
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v jtk >/dev/null 2>&1; then jtk guard; else echo \"jtk がないので守れません\" >&2; exit 2; fi"
+            "command": "if command -v jtk >/dev/null 2>&1; then jtk guard || exit 2; else echo \"jtk がないので守れません\" >&2; exit 2; fi"
           }
         ]
       }
@@ -149,6 +149,7 @@ jtk guard は文字列の照合で、完全な防御ではありません。
 - ワイルドカード、スクリプトの中でのパス組み立て、別名のパスなどで、回避できてしまいます
 - プロジェクトのルートから `ls -R` や `find` を実行すると、`_inbox` の中のファイル名が見えることがあります
 - Grep / Glob をプロジェクトのルートから実行するときは、守られたフォルダの外を指す `path` を明示する必要があります。無ければ拒まれます
+- 調べるのは、上に挙げた道具（Read / Edit / Write / MultiEdit / NotebookEdit / Grep / Glob / Bash / PowerShell）の呼び出しだけです。MCP のファイル操作の道具など、ほかの道具は調べずに通します
 - 守られるのは、そのフォルダで起動した Claude Code だけです。別のフォルダで起動した Claude Code、ほかの AI ツール、自分の端末は対象外です
 
 名前の入った対応表は、フックに頼りきらず、AI を使うフォルダの外に置いてください。

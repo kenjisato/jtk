@@ -105,22 +105,44 @@ def _glob_regex(pattern: str) -> str:
     return "".join(parts)
 
 
-def _segments(path: str, cwd: str) -> list[str]:
-    """パスを `/` 区切りの絶対パスの区切りの列にする。存在は問わない。"""
+_POSIX_DRIVE = re.compile(r"/(?:mnt/|cygdrive/)?([A-Za-z])(?=/|$)")
+
+
+def _segments(path: str, cwd: str, windows: bool | None = None) -> list[str]:
+    """パスを `/` 区切りの絶対パスの区切りの列にする。存在は問わない。
+
+    Windows では、Git Bash・WSL・Cygwin のドライブ表記（`/c/`、`/mnt/c/`、`/cygdrive/c/`）を `C:/` に直す。
+    """
+    if windows is None:
+        windows = os.name == "nt"
     s = path.replace("\\", "/")
     if not (s.startswith("/") or re.match(r"[A-Za-z]:/", s)):
         s = cwd.replace("\\", "/").rstrip("/") + "/" + s
+    if windows:
+        m = _POSIX_DRIVE.match(s)
+        if m:
+            s = m.group(1).upper() + ":/" + s[m.end():]
     return [seg for seg in posixpath.normpath(s).split("/") if seg]
+
+
+def _same(a: list[str], b: list[str]) -> bool:
+    return len(a) == len(b) and all(x.casefold() == y.casefold() for x, y in zip(a, b))
 
 
 def _relative(path: str, cwd: str, config: GuardConfig) -> str | None:
     """root からの相対パス（`/` 区切り）。root の外なら None。root 自身は ""。"""
     root = _segments(str(config.root), "")
     segs = _segments(path, cwd)
-    head = segs[: len(root)]
-    if len(head) != len(root) or any(a.casefold() != b.casefold() for a, b in zip(head, root)):
+    if not _same(segs[: len(root)], root):
         return None
     return "/".join(segs[len(root):])
+
+
+def _is_root_or_ancestor(path: str, cwd: str, config: GuardConfig) -> bool:
+    """path が root 自身か、root の祖先（root の外）か。大文字小文字は区別しない。"""
+    segs = _segments(path, cwd)
+    root = _segments(str(config.root), "")
+    return len(segs) <= len(root) and _same(segs, root[: len(segs)])
 
 
 def _matched_entry(rel: str | None, config: GuardConfig, include_dirs: bool) -> str | None:
@@ -140,17 +162,20 @@ def _matched_entry(rel: str | None, config: GuardConfig, include_dirs: bool) -> 
     return None
 
 
-def _contains_protected_dir(rel: str | None, config: GuardConfig) -> bool:
-    """rel が、ある `X/**` の `X` の祖先（root を含む）か。root の外なら False。"""
+def _contains_protected_dir(path: str, cwd: str, config: GuardConfig) -> bool:
+    """path が、ある `X/**` の `X` の祖先か。root 自身と、root の外にある root の祖先も含む。"""
+    dir_entries = [p[:-3] for p in config.paths if p.endswith("/**")]
+    if not dir_entries:
+        return False
+    if _is_root_or_ancestor(path, cwd, config):
+        return True
+    rel = _relative(path, cwd, config)
     if rel is None:
         return False
-    for p in config.paths:
-        if not p.endswith("/**"):
-            continue
-        segments = p[:-3].split("/")
-        for k in range(len(segments)):
-            prefix = "/".join(segments[:k])
-            if (rel == "") if k == 0 else glob_match(prefix, rel):
+    for entry in dir_entries:
+        segments = entry.split("/")
+        for k in range(1, len(segments)):
+            if glob_match("/".join(segments[:k]), rel):
                 return True
     return False
 
@@ -196,7 +221,7 @@ def decide(payload: dict, config: GuardConfig) -> str | None:
         entry = _matched_entry(rel, config, include_dirs=True)
         if entry is not None:
             return REASON.format(entry)
-        if _contains_protected_dir(rel, config):
+        if _contains_protected_dir(target, cwd, config):
             return SEARCH_ROOT_REASON
         for key in ("pattern", "glob"):
             if _escapes_search_root(tool_input.get(key)):

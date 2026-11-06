@@ -1,4 +1,8 @@
 import json
+import os
+import re
+import subprocess
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -311,9 +315,36 @@ def test_guard_search_root_reason_has_no_names(cfg):
     assert "path" in SEARCH_ROOT_REASON
 
 
-def test_guard_search_from_parent_of_root_is_allowed(cfg):
-    # R4: root の外は paths に当たらない
-    assert call("Grep", cfg, pattern="abc", path=str(cfg.root.parent)) is None
+def test_guard_search_from_ancestor_of_root_is_denied(cfg):
+    # root の祖先から検索すると、守られたフォルダの中も検索される
+    assert call("Grep", cfg, pattern="abc", path=str(cfg.root.parent)) == SEARCH_ROOT_REASON
+    assert call("Glob", cfg, pattern="*", path=str(cfg.root.parent.parent)) == SEARCH_ROOT_REASON
+
+
+def test_guard_search_from_dotdot_is_denied(cfg):
+    assert call("Grep", cfg, pattern="abc", path="..") == SEARCH_ROOT_REASON
+    assert call("Glob", cfg, cwd=cfg.root / "B25", pattern="*", path="../..") == SEARCH_ROOT_REASON
+    assert call("Grep", cfg, cwd=cfg.root.parent, pattern="abc") == SEARCH_ROOT_REASON
+
+
+def test_guard_search_from_absolute_parent_any_case_is_denied(cfg):
+    parent = str(cfg.root.parent)
+    assert call("Grep", cfg, pattern="abc", path=parent.upper()) == SEARCH_ROOT_REASON
+    assert call("Grep", cfg, pattern="abc", path=parent.replace("\\", "/").lower()) == SEARCH_ROOT_REASON
+
+
+def test_guard_search_ancestor_without_dir_entry_is_allowed(tmp_path):
+    config = GuardConfig(root=tmp_path / "root", paths=["*.docx"], command_words=[])
+    assert decide({"cwd": str(tmp_path), "tool_name": "Grep",
+                   "tool_input": {"pattern": "x", "path": str(tmp_path)}}, config) is None
+
+
+def test_guard_search_in_unrelated_dir_outside_root_is_allowed(cfg, tmp_path):
+    # root の親の下でも、root の祖先でなければ（兄弟のフォルダ）通す
+    sibling = cfg.root.parent / "別のフォルダ"
+    assert call("Grep", cfg, pattern="abc", path=str(sibling)) is None
+    assert call("Glob", cfg, pattern="*", path="../別のフォルダ") is None
+    assert call("Grep", cfg, pattern="abc", path=str(cfg.root.parent / "研究室2")) is None
 
 
 def test_guard_search_in_sibling_dir_is_allowed(cfg):
@@ -372,3 +403,96 @@ def test_cli_unexpected_error_fails_closed(cli_runner, cfg, monkeypatch):
     r = run_guard(cli_runner, {"cwd": str(cfg.root), "tool_name": "Bash", "tool_input": {"command": "ls"}})
     assert r.exit_code == 2
     assert r.stderr == "jtk guard: 判定できません\n"
+
+
+# --- final review fixes ---
+
+
+@pytest.mark.parametrize("given,expected", [
+    ("/c/Users/x", ["C:", "Users", "x"]),
+    ("/mnt/d/a/b", ["D:", "a", "b"]),
+    ("/cygdrive/e/a", ["E:", "a"]),
+    ("/c", ["C:"]),
+    ("/mnt/c", ["C:"]),
+    ("/usr/bin", ["usr", "bin"]),
+    ("/mnt", ["mnt"]),
+])
+def test_segments_maps_posix_drive_prefixes_on_windows(given, expected):
+    assert jtk.guard._segments(given, "", windows=True) == expected
+
+
+def test_segments_keeps_posix_paths_off_windows():
+    assert jtk.guard._segments("/c/Users/x", "", windows=False) == ["c", "Users", "x"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows のドライブ表記")
+@pytest.mark.parametrize("prefix", ["/{d}/", "/mnt/{d}/", "/cygdrive/{d}/"])
+def test_guard_denies_git_bash_style_path(cfg, prefix):
+    drive, rest = str(cfg.root).replace("\\", "/").split(":/", 1)
+    path = prefix.format(d=drive.lower()) + rest + "/private/student-ids.xlsx"
+    assert call("Read", cfg, file_path=path) == "jtk guard: 守られたファイルです（private）"
+
+
+def _readme_guard_toml() -> str:
+    text = (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
+    block = re.search(r"```toml\n(\[jtk\.guard\].*?)```", text, re.S)
+    assert block is not None
+    return block.group(1)
+
+
+@pytest.fixture
+def readme_cfg(tmp_path):
+    root = tmp_path / "研究室"
+    (root / ".claude").mkdir(parents=True)
+    (root / ".claude" / "jtk-guard.toml").write_text(_readme_guard_toml(), encoding="utf-8")
+    config = load_guard_config(root)
+    assert config is not None
+    return config
+
+
+@pytest.mark.parametrize("command", [
+    "ls _inbox",
+    "cd private && ls",
+    "jtk table roster fill x --danger",
+    "cat private/student-ids.xlsx",
+    "Get-ChildItem _INBOX",
+])
+def test_readme_config_denies_commands(readme_cfg, command):
+    assert call("Bash", readme_cfg, command=command) is not None
+
+
+def test_readme_config_allows_harmless_command(readme_cfg):
+    assert call("Bash", readme_cfg, command="git status") is None
+
+
+def _readme_hook_command() -> str:
+    text = (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
+    block = re.search(r'```json\n(\{\s*"hooks".*?)```', text, re.S)
+    assert block is not None
+    return json.loads(block.group(1))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+
+
+@pytest.mark.skipif(jtk.guard._hook_shell() is None, reason="フックを動かすシェルがない")
+@pytest.mark.parametrize("fake_exit,expected", [(1, 2), (2, 2), (0, 0), (127, 2)])
+def test_readme_hook_command_fails_closed(tmp_path, fake_exit, expected):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "jtk"
+    fake.write_bytes(f"#!/bin/sh\nexit {fake_exit}\n".encode())
+    fake.chmod(0o755)
+    shell = jtk.guard._hook_shell()
+    command = f'PATH="$(cd "{bindir.as_posix()}" && pwd):$PATH"; ' + _readme_hook_command()
+    code = subprocess.run([shell, "-c", command], input=b"{}", capture_output=True, timeout=30).returncode
+    assert code == expected
+
+
+@pytest.mark.skipif(jtk.guard._hook_shell() is None, reason="フックを動かすシェルがない")
+def test_readme_hook_command_without_jtk_exits_2(tmp_path):
+    shell = jtk.guard._hook_shell()
+    command = 'command() { return 1; }; ' + _readme_hook_command()
+    code = subprocess.run([shell, "-c", command], input=b"{}", capture_output=True, timeout=30).returncode
+    assert code == 2
+
+
+def test_segments_maps_posix_drive_in_cwd_on_windows():
+    assert jtk.guard._segments("a/b", "/c/root", windows=True) == ["C:", "root", "a", "b"]
