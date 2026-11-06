@@ -49,7 +49,7 @@ def test_verify_passes_with_guard_hook(project_with_guard):
 
 def test_verify_fails_without_settings(tmp_path):
     root = make_project(tmp_path / "研究室", None)
-    assert verify_guard(root / "private/r.xlsx") == ["`.claude/settings.json` がありません"]
+    assert verify_guard(root / "private/r.xlsx") == ["`.claude/settings.json` も `.claude/settings.local.json` もありません"]
 
 
 def test_verify_fails_when_hook_allows(project_with_noop_hook):
@@ -97,3 +97,9 @@ def test_verify_reports_hook_timeout(tmp_path, monkeypatch):
     failures = verify_guard(root / "private/r.xlsx")
     assert "Read が拒まれません" in failures
     assert all("r.xlsx" not in f and "研究室" not in f for f in failures)
+
+
+def test_verify_passes_with_local_settings_only(tmp_path):
+    root = make_project(tmp_path / "研究室", None, local=hooks(GUARD_COMMAND))
+    assert not (root / ".claude" / "settings.json").exists()
+    assert verify_guard(root / "private/r.xlsx") == []

@@ -255,7 +255,7 @@ def _judge(data: bytes) -> str | None:
 # --- フックが効いているかの検査 ---
 
 HOOK_TIMEOUT = 20
-NO_SETTINGS = "`.claude/settings.json` がありません"
+NO_SETTINGS = "`.claude/settings.json` も `.claude/settings.local.json` もありません"
 BAD_SETTINGS = "`.claude/settings.json` か `.claude/settings.local.json` を JSON として読めません"
 NO_HOOKS = "`.claude/settings.json` に、Read・Bash・Grep に当たる PreToolUse のフックがありません"
 NO_SHELL = "フックを動かすシェル（Git Bash）が見つかりません"
@@ -309,7 +309,7 @@ def verify_guard(target: Path) -> list[str]:
 
 
 def _find_settings_root(target: Path) -> Path | None:
-    """target から親へたどり、.claude/settings.json のあるフォルダを返す。
+    """target から親へたどり、.claude/settings.json か settings.local.json のあるフォルダを返す。
 
     ホームの .claude/settings.json はユーザー全体の設定で、プロジェクトの設定ではないので数えない。
     """
@@ -317,7 +317,8 @@ def _find_settings_root(target: Path) -> Path | None:
     for directory in target.parents:
         if os.path.normcase(directory) == os.path.normcase(home):
             continue
-        if (directory / ".claude" / "settings.json").is_file():
+        claude_dir = directory / ".claude"
+        if (claude_dir / "settings.json").is_file() or (claude_dir / "settings.local.json").is_file():
             return directory
     return None
 
