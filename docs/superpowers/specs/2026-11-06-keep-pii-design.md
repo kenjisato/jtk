@@ -48,6 +48,22 @@ jtk table pii hash student-ids.xlsx --scope Thesis --hash メールアドレス 
 
 `--encrypt` だけのとき（PII を消す場合）は、2 だけを確かめる（パスワードの入力に端末が要るため）。
 
+## ID の一覧（`--index`）
+
+Claude が知る必要があるのは ID だけで、ID と氏名の対応は要らない。そこで `--keep-pii` の実行で、名前を消した一覧も一緒に書き出せるようにする。
+
+```
+jtk table pii hash private\student-ids.xlsx --scope Thesis --hash メールアドレス --hash-column ID \
+    --pii 姓 --pii 名 --pii 別表記 --keep-pii --encrypt --out private\student-ids.xlsx --force \
+    --index ids.xlsx
+```
+
+- `--index PATH` は `--keep-pii` のときだけ使える。
+- 一覧は、ID を埋めた後の表から `--pii` の列と `--hash` の列（メールアドレス）を消したもの。上の例なら `学年, 呼称, ID`。平文で書く。形式は拡張子（`.xlsx` / `.csv`）で決める。
+- 一覧には漏れの検査をかける（`pii drop` と同じ）。漏れがあれば、対応表も一覧も書かずに止まる。
+- 一覧は、埋める行が無くて対応表を書き換えないときも書く。既存のファイルの上書きは `--force` の流儀に従う。入力・`--out` と同じ場所は拒む。
+- 書く順番は、検査がすべて済んでから対応表、その後に一覧。
+
 ## 表示
 
 件数・列名・スコープ・鍵の指紋だけを出す。名前とメールアドレスは出さない。`--keep-pii` のときは「漏れの検査: しませんでした（--keep-pii）」と出す。
