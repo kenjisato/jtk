@@ -9,10 +9,13 @@ from typing import Annotated, Optional
 import typer
 
 from jtk import crypto, keys
+from jtk import roster as roster_mod
 from jtk.errors import JtkError, exit_on_error
+from jtk.guard import verify_guard
 from jtk.table.io import read_table, write_table
 from jtk.table.leaks import collect_needles, find_leaks
 from jtk.table.pii import resolve_roles, transform
+from jtk.table.secure_io import read_encrypted_xlsx
 from jtk.table.settings import (
     PiiSettings,
     load_pii_settings,
@@ -23,6 +26,8 @@ from jtk.table.settings import (
 app = typer.Typer(help="表の道具", pretty_exceptions_enable=False)
 pii_app = typer.Typer(help="個人情報の列を消す・ハッシュに置き換える", pretty_exceptions_enable=False)
 app.add_typer(pii_app, name="pii")
+roster_app = typer.Typer(help="対応表（学生名簿）の道具", pretty_exceptions_enable=False)
+app.add_typer(roster_app, name="roster")
 
 Input = Annotated[Path, typer.Argument(metavar="INPUT", help="入力の表（.xlsx / .csv）")]
 Config = Annotated[Optional[Path], typer.Option("--config", help="設定ファイル（TOML）")]
@@ -249,3 +254,33 @@ def hash(
 ):
     """メールアドレスの列をハッシュに置き換え、個人情報の列を消して書き出す。"""
     _run("hash", input, config, out, preset, pii, omit, move_original, force, scope, hash_, hash_column)
+
+
+@roster_app.command()
+@exit_on_error
+def fill(
+    roster: Annotated[Path, typer.Argument(metavar="ROSTER", help="暗号化された対応表（.xlsx）")],
+    scope: Annotated[str, typer.Option("--scope", help="ハッシュの範囲（例: 2026後期/授業名）")],
+    danger: Annotated[bool, typer.Option("--danger", help="対応表を開く危険な操作だと承知している")] = False,
+):
+    """対応表の ID の空欄を、メールアドレスのハッシュで埋めて上書き保存する。"""
+    if not danger:
+        raise JtkError("対応表を開く危険な操作です。意図して実行するなら --danger を付けてください")
+    roster_mod.require_tty()
+    failures = verify_guard(roster)
+    if failures:
+        raise JtkError("\n".join(["対応表が Claude Code のフックで守られていません。", *failures]))
+    if typer.prompt(f"確認のため、ファイル名 {roster.name} を打ち直してください") != roster.name:
+        raise JtkError("ファイル名が一致しません")
+    master = keys.load_master_key()
+    scope_key = crypto.derive_scope_key(master, scope)
+    password = roster_mod.prompt_password()
+    table = read_encrypted_xlsx(roster, password)
+    filled = roster_mod.fill_ids(table, scope_key)
+    if filled:
+        roster_mod.save_roster(table, roster, password)
+    typer.echo(f"埋めた件数: {len(filled)} 件")
+    for id_ in filled:
+        typer.echo(f"  {id_}")
+    typer.echo(f"スコープ: {scope}")
+    typer.echo(f"鍵の指紋: {crypto.fingerprint(master)}")

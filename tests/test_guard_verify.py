@@ -1,37 +1,9 @@
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
+from conftest import GUARD_COMMAND, hooks, make_project
 from jtk.guard import verify_guard
-
-GUARD_TOML = """\
-[jtk.guard]
-paths = ["private/**"]
-command_words = ["private/", "private\\\\"]
-"""
-
-GUARD_COMMAND = f'"{Path(sys.executable).as_posix()}" -m jtk guard'
-
-
-def make_project(root: Path, settings: dict | None, local: dict | None = None) -> Path:
-    (root / ".claude").mkdir(parents=True)
-    (root / ".claude" / "jtk-guard.toml").write_text(GUARD_TOML, encoding="utf-8")
-    if settings is not None:
-        (root / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
-    if local is not None:
-        (root / ".claude" / "settings.local.json").write_text(json.dumps(local), encoding="utf-8")
-    (root / "private").mkdir()
-    (root / "private" / "r.xlsx").write_bytes(b"")
-    (root / "public").mkdir()
-    (root / "public" / "r.xlsx").write_bytes(b"")
-    return root
-
-
-def hooks(command: str, matcher: str = "*") -> dict:
-    return {"hooks": {"PreToolUse": [{"matcher": matcher, "hooks": [{"type": "command", "command": command}]}]}}
-
 
 @pytest.fixture
 def project_with_guard(tmp_path):
