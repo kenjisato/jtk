@@ -8,7 +8,10 @@ import json
 import os
 import posixpath
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,8 +121,6 @@ def _relative(path: str, cwd: str, config: GuardConfig) -> str | None:
     if len(head) != len(root) or any(a.casefold() != b.casefold() for a, b in zip(head, root)):
         return None
     return "/".join(segs[len(root):])
-
-
 
 
 def _matched_entry(rel: str | None, config: GuardConfig, include_dirs: bool) -> str | None:
@@ -249,3 +250,168 @@ def _judge(data: bytes) -> str | None:
     if config is None:
         return None
     return decide(payload, config)
+
+
+# --- フックが効いているかの検査 ---
+
+HOOK_TIMEOUT = 20
+NO_SETTINGS = "`.claude/settings.json` がありません"
+BAD_SETTINGS = "`.claude/settings.json` か `.claude/settings.local.json` を JSON として読めません"
+NO_HOOKS = "`.claude/settings.json` に、Read・Bash・Grep に当たる PreToolUse のフックがありません"
+NO_SHELL = "フックを動かすシェル（Git Bash）が見つかりません"
+HOOK_TIMED_OUT = "フックが {} 秒で終わりません"
+HOOK_NOT_STARTED = "フックのコマンドを起動できません"
+NOT_DENIED = "{} が拒まれません"
+
+
+def verify_guard(target: Path) -> list[str]:
+    """target が PreToolUse のフックで守られているかを、偽の呼び出しで確かめる。
+
+    失敗の説明の一覧を返す。空なら合格。説明には実際のパスを入れない。
+    """
+    target = Path(os.path.abspath(target))
+    root = _find_settings_root(target)
+    if root is None:
+        return [NO_SETTINGS]
+    try:
+        entries = _pre_tool_use_entries(root / ".claude")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return [BAD_SETTINGS]
+
+    calls = [
+        ("Read", {"file_path": str(target)}),
+        ("Bash", {"command": f'cat "{target}"'}),
+        ("Grep", {"pattern": "a", "path": str(target.parent)}),
+    ]
+    commands = {tool: _commands_for(tool, entries) for tool, _ in calls}
+    if not any(commands.values()):
+        return [NO_HOOKS]
+    shell = _hook_shell()
+    if shell is None:
+        return [NO_SHELL]
+
+    failures: list[str] = []
+    problems: list[str] = []
+    for tool, tool_input in calls:
+        payload = {"tool_name": tool, "tool_input": tool_input, "cwd": str(root), "hook_event_name": "PreToolUse"}
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        denied = False
+        for command in commands[tool]:
+            outcome = _run_hook(shell, command, data, root)
+            if outcome is True:
+                denied = True
+                break
+            if isinstance(outcome, str) and outcome not in problems:
+                problems.append(outcome)
+        if not denied:
+            failures.append(NOT_DENIED.format(tool))
+    return failures + problems
+
+
+def _find_settings_root(target: Path) -> Path | None:
+    """target から親へたどり、.claude/settings.json のあるフォルダを返す。
+
+    ホームの .claude/settings.json はユーザー全体の設定で、プロジェクトの設定ではないので数えない。
+    """
+    home = Path(os.path.abspath(Path.home()))
+    for directory in target.parents:
+        if os.path.normcase(directory) == os.path.normcase(home):
+            continue
+        if (directory / ".claude" / "settings.json").is_file():
+            return directory
+    return None
+
+
+def _pre_tool_use_entries(claude_dir: Path) -> list[dict]:
+    """settings.json と settings.local.json の hooks.PreToolUse を合わせる。"""
+    entries: list[dict] = []
+    for name in ("settings.json", "settings.local.json"):
+        path = claude_dir / name
+        if not path.is_file():
+            continue
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        hooks = data.get("hooks") if isinstance(data, dict) else None
+        pre = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+        if isinstance(pre, list):
+            entries.extend(e for e in pre if isinstance(e, dict))
+    return entries
+
+
+def _matcher_hits(matcher: object, tool: str) -> bool:
+    if matcher is None or matcher == "" or matcher == "*":
+        return True
+    if not isinstance(matcher, str):
+        return False
+    try:
+        return re.fullmatch(matcher, tool) is not None
+    except re.error:
+        return False
+
+
+def _commands_for(tool: str, entries: list[dict]) -> list[str]:
+    commands = []
+    for entry in entries:
+        if not _matcher_hits(entry.get("matcher"), tool):
+            continue
+        hooks = entry.get("hooks")
+        for hook in hooks if isinstance(hooks, list) else []:
+            if isinstance(hook, dict) and hook.get("type") == "command" and isinstance(hook.get("command"), str):
+                commands.append(hook["command"])
+    return commands
+
+
+def _hook_shell() -> str | None:
+    """Claude Code がフックを動かすのと同じシェル。Windows では Git Bash、ほかでは /bin/sh。"""
+    if os.name != "nt":
+        return "/bin/sh"
+    found = shutil.which("bash")
+    if found is not None and not _is_wsl_launcher(Path(found)):
+        return found
+    fallback = Path(r"C:\Program Files\Git\bin\bash.exe")
+    return str(fallback) if fallback.is_file() else None
+
+
+def _is_wsl_launcher(path: Path) -> bool:
+    """System32 や WindowsApps の bash.exe は WSL の入り口で、Git Bash ではない。"""
+    parts = {p.casefold() for p in path.parts}
+    return "system32" in parts or "windowsapps" in parts
+
+
+def _run_hook(shell: str, command: str, data: bytes, root: Path) -> bool | str:
+    """フックのコマンドを 1 つ動かす。拒んだら True、通したら False、動かせなければ説明。
+
+    出力は一時ファイルで受ける。フックが残した子プロセスがパイプを握っていても待たされない。
+    """
+    env = {**os.environ, "CLAUDE_PROJECT_DIR": str(root)}
+    with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as stdout:
+        stdin.write(data)
+        stdin.seek(0)
+        try:
+            process = subprocess.Popen(
+                [shell, "-c", command], stdin=stdin, stdout=stdout, stderr=subprocess.DEVNULL, cwd=root, env=env
+            )
+        except OSError:
+            return HOOK_NOT_STARTED
+        try:
+            code = process.wait(timeout=HOOK_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            return HOOK_TIMED_OUT.format(HOOK_TIMEOUT)
+        if code == 2:
+            return True
+        stdout.seek(0)
+        return _says_deny(stdout.read())
+
+
+def _says_deny(output: bytes) -> bool:
+    try:
+        result = json.loads(output.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(result, dict):
+        return False
+    specific = result.get("hookSpecificOutput")
+    if isinstance(specific, dict) and specific.get("permissionDecision") == "deny":
+        return True
+    return result.get("permissionDecision") == "deny"
