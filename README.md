@@ -123,11 +123,12 @@ AI（Claude Code）が知る必要があるのは ID だけで、ID と氏名の
 
 ```
 jtk table pii hash private\student-ids.xlsx --scope Thesis --hash メールアドレス --hash-column ID \
-    --pii 姓 --pii 名 --pii 別表記 --omit メモ --keep-pii --encrypt --out private\student-ids.xlsx --force \
+    --pii 姓 --pii 名 --omit メモ --keep-pii --encrypt --out private\student-ids.xlsx --force \
     --index ids.xlsx
 ```
 
-- 一覧は、ID を埋めた後の表から、`--pii` の列と `--hash` の列（メールアドレス）と `--omit` の列を消したものです。上の例なら `学年, 呼称, ID` のような表になります。パスワードは付けず、形式は拡張子（`.xlsx` / `.csv`）で決めます
+- 一覧は、ID を埋めた後の表から、`--pii` の列と `--hash` の列（メールアドレス）と `--omit` の列を消したものです。対応表が `学年, 姓, 名, メールアドレス, メモ, ID` なら、一覧は `学年, ID` になります。パスワードは付けず、形式は拡張子（`.xlsx` / `.csv`）で決めます
+- 「Aさん」のような呼び名は対応表に持たせません。文書ごとに ID との対応を決め、その文書の側に書きます。ID と呼び名だけの対応には名前が入らないので、守るフォルダの外に置けます
 - `--omit` の列は一覧からだけ消し、対応表には残します。`--pii` と違って、漏れの検査では探しません。メモの列など、個人情報ではないが一覧に要らない列に使います
 - 一覧には `pii drop` と同じ漏れの検査をかけます。漏れがあれば、対応表も一覧も書かずに止まります
 - 埋める行が無く対応表を書き換えないときも、一覧は書きます
