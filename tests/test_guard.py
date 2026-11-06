@@ -5,7 +5,8 @@ from typer.testing import CliRunner
 
 from jtk.cli import app
 from jtk.errors import JtkError
-from jtk.guard import GuardConfig, decide, glob_match, load_guard_config
+import jtk.guard
+from jtk.guard import SEARCH_ROOT_REASON, GuardConfig, decide, glob_match, load_guard_config
 
 CONFIG_TOML = """\
 [jtk.guard]
@@ -54,7 +55,7 @@ def test_guard_denies_read_of_roster(cfg):
 
 def test_guard_denies_any_file_under_protected_dir(cfg):
     reason = call("Read", cfg, file_path=str(cfg.root / "private" / "student-ids-PC1.xlsx"))
-    assert reason == "jtk guard: 守られたファイルです（private/student-ids-PC1.xlsx）"
+    assert reason == "jtk guard: 守られたファイルです（private）"
 
 
 def test_guard_denies_grep_on_protected_dir(cfg):
@@ -79,7 +80,7 @@ def test_guard_denies_danger_flag(cfg):
 def test_guard_windows_paths_case_insensitive(cfg):
     win = str(cfg.root).replace("/", "\\") + "\\PRIVATE\\student-ids.xlsx"
     reason = call("Read", cfg, file_path=win)
-    assert reason == "jtk guard: 守られたファイルです（PRIVATE/student-ids.xlsx）"
+    assert reason == "jtk guard: 守られたファイルです（private）"
 
 
 def test_cli_exit_code_2_on_deny(cli_runner, cfg):
@@ -88,7 +89,7 @@ def test_cli_exit_code_2_on_deny(cli_runner, cfg):
         "tool_input": {"file_path": str(cfg.root / "private" / "student-ids.xlsx")},
     })
     assert r.exit_code == 2
-    assert "jtk guard: 守られたファイルです（private/student-ids.xlsx）" in r.stderr
+    assert "jtk guard: 守られたファイルです（private）" in r.stderr
 
 
 def test_cli_exit_0_without_config(cli_runner, tmp_path):
@@ -105,7 +106,7 @@ def test_cli_exit_0_without_config(cli_runner, tmp_path):
 
 def test_guard_denies_docx_deep_in_student_dir(cfg):
     reason = call("Edit", cfg, file_path=str(cfg.root / "B25" / "abcd" / "sub" / "計画.DOCX"))
-    assert reason == "jtk guard: 守られたファイルです（B25/abcd/sub/計画.DOCX）"
+    assert reason == "jtk guard: 守られたファイルです（B25/**/*.docx）"
 
 
 def test_guard_denies_pdf_directly_in_cohort_dir(cfg):
@@ -125,7 +126,7 @@ def test_guard_relative_path_resolved_against_cwd(cfg):
 
 def test_guard_dotdot_is_collapsed(cfg):
     reason = call("Read", cfg, file_path=str(cfg.root / "B25" / ".." / "private" / "x"))
-    assert reason == "jtk guard: 守られたファイルです（private/x）"
+    assert reason == "jtk guard: 守られたファイルです（private）"
 
 
 def test_guard_forward_slash_windows_path(cfg):
@@ -159,7 +160,7 @@ def test_guard_denies_grep_inside_protected_dir(cfg):
 def test_guard_grep_without_path_uses_cwd(cfg):
     assert call("Grep", cfg, cwd=cfg.root / "private", pattern="abc") == "jtk guard: 守られたファイルです（private）"
     assert call("Glob", cfg, cwd=cfg.root / "_inbox", pattern="*") is not None
-    assert call("Grep", cfg, pattern="abc") is None
+    assert call("Grep", cfg, pattern="abc") == SEARCH_ROOT_REASON
 
 
 def test_guard_grep_allowed_on_other_dir(cfg):
@@ -168,9 +169,9 @@ def test_guard_grep_allowed_on_other_dir(cfg):
 
 
 def test_guard_denies_grep_pattern_and_glob_words(cfg):
-    assert call("Glob", cfg, pattern="private/**") == "jtk guard: 守られたファイルです（private/）"
-    assert call("Glob", cfg, pattern="**/*.PDF") == "jtk guard: 守られたファイルです（.pdf）"
-    assert call("Grep", cfg, pattern="abc", glob="*.docx") == "jtk guard: 守られたファイルです（.docx）"
+    assert call("Glob", cfg, pattern="private/**", path=str(cfg.root / "B25")) == "jtk guard: 守られたファイルです（private/）"
+    assert call("Glob", cfg, pattern="**/*.PDF", path=str(cfg.root / "B25")) == "jtk guard: 守られたファイルです（.pdf）"
+    assert call("Grep", cfg, pattern="abc", glob="*.docx", path=str(cfg.root / "B25")) == "jtk guard: 守られたファイルです（.docx）"
 
 
 # --- Bash / PowerShell ---
@@ -293,4 +294,81 @@ def test_cli_reads_utf8_japanese_path(cli_runner, cfg):
     }
     r = run_guard(cli_runner, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
     assert r.exit_code == 2
-    assert "private/名簿.xlsx" in r.stderr
+    assert "（private）" in r.stderr and "名簿" not in r.stderr
+
+
+# --- fix round 1 (R11, R12, reason without names) ---
+
+
+def test_guard_search_from_root_with_explicit_path_is_denied(cfg):
+    assert call("Grep", cfg, pattern="abc", path=str(cfg.root)) == SEARCH_ROOT_REASON
+    assert call("Glob", cfg, pattern="*.txt", path=".") == SEARCH_ROOT_REASON
+    assert call("Glob", cfg, cwd=cfg.root / "B25", pattern="*.txt", path="..") == SEARCH_ROOT_REASON
+
+
+def test_guard_search_root_reason_has_no_names(cfg):
+    assert "private" not in SEARCH_ROOT_REASON and "_inbox" not in SEARCH_ROOT_REASON
+    assert "path" in SEARCH_ROOT_REASON
+
+
+def test_guard_search_from_parent_of_root_is_allowed(cfg):
+    # R4: root の外は paths に当たらない
+    assert call("Grep", cfg, pattern="abc", path=str(cfg.root.parent)) is None
+
+
+def test_guard_search_in_sibling_dir_is_allowed(cfg):
+    assert call("Grep", cfg, pattern="abc", path=str(cfg.root / "B25")) is None
+    assert call("Glob", cfg, cwd=cfg.root / "B25", pattern="*.txt") is None
+
+
+def test_guard_search_ancestor_of_nested_protected_dir_is_denied(tmp_path):
+    config = GuardConfig(root=tmp_path, paths=["a/b/secret/**"], command_words=[])
+    assert decide({"cwd": str(tmp_path), "tool_name": "Grep",
+                   "tool_input": {"pattern": "x", "path": str(tmp_path / "a")}}, config) == SEARCH_ROOT_REASON
+    assert decide({"cwd": str(tmp_path), "tool_name": "Grep",
+                   "tool_input": {"pattern": "x", "path": str(tmp_path / "a" / "c")}}, config) is None
+
+
+def test_guard_reason_omits_name_under_whole_folder_entry(cfg):
+    reason = call("Read", cfg, file_path=str(cfg.root / "_inbox" / "架空太郎_計画書.docx"))
+    assert reason == "jtk guard: 守られたファイルです（_inbox）"
+    assert "架空太郎" not in reason
+    reason = call("Glob", cfg, pattern="*", path=str(cfg.root / "_inbox" / "架空花子"))
+    assert reason == "jtk guard: 守られたファイルです（_inbox）"
+
+
+def test_guard_reason_reports_pattern_not_path(cfg):
+    reason = call("Read", cfg, file_path=str(cfg.root / "B25" / "abcd" / "架空太郎.pdf"))
+    assert reason == "jtk guard: 守られたファイルです（B25/**/*.pdf）"
+
+
+@pytest.mark.parametrize("key,value", [
+    ("pattern", "../*"),
+    ("pattern", "B25/../../x/*"),
+    ("pattern", r"..\*"),
+    ("pattern", "/etc/*"),
+    ("pattern", "C:/Users/*"),
+    ("pattern", r"c:\x\*"),
+    ("glob", "../**"),
+])
+def test_guard_search_pattern_escaping_root_is_denied(cfg, key, value):
+    tool = "Glob" if key == "pattern" else "Grep"
+    tool_input = {key: value, "path": str(cfg.root / "B25")}
+    if key == "glob":
+        tool_input["pattern"] = "abc"
+    reason = call(tool, cfg, **tool_input)
+    assert reason is not None and "jtk guard" in reason
+
+
+def test_guard_search_pattern_with_dots_in_name_is_allowed(cfg):
+    assert call("Glob", cfg, pattern="**/a..b.txt", path=str(cfg.root / "B25")) is None
+
+
+def test_cli_unexpected_error_fails_closed(cli_runner, cfg, monkeypatch):
+    def boom(payload, config):
+        raise RuntimeError("架空太郎")
+
+    monkeypatch.setattr(jtk.guard, "decide", boom)
+    r = run_guard(cli_runner, {"cwd": str(cfg.root), "tool_name": "Bash", "tool_input": {"command": "ls"}})
+    assert r.exit_code == 2
+    assert r.stderr == "jtk guard: 判定できません\n"

@@ -1,20 +1,32 @@
 """Claude Code の PreToolUse フック。守られたファイルに触る道具の呼び出しを拒む。
 
-理由の文には root からの相対パスか、設定にある語だけを入れる。ファイルの中身や
-コマンドの全文は入れない。
+理由の文には設定にある項目（`X/**` なら `X`）か語だけを入れる。実際のパス
+（学生の名前を含みうる）、ファイルの中身、コマンドの全文は入れない。
 """
 
+import json
 import os
 import posixpath
 import re
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
+
+import typer
 
 from jtk.errors import JtkError
 
 CONFIG_RELPATH = Path(".claude") / "jtk-guard.toml"
 REASON = "jtk guard: 守られたファイルです（{}）"
+SEARCH_ROOT_REASON = (
+    "jtk guard: この場所の下には守られたフォルダがあります。"
+    "守られたフォルダの外を指す path を指定して検索してください"
+)
+PATTERN_REASON = "jtk guard: 検索パターンに .. や絶対パスは使えません。path で検索先を指定してください"
+BAD_INPUT_REASON = "jtk guard: 標準入力を JSON として読めません"
+UNDECIDABLE_REASON = "jtk guard: 判定できません"
 
 FILE_TOOLS = {
     "Read": "file_path",
@@ -108,14 +120,46 @@ def _relative(path: str, cwd: str, config: GuardConfig) -> str | None:
     return "/".join(segs[len(root):])
 
 
-def _protected_path(rel: str | None, config: GuardConfig, include_dirs: bool) -> bool:
+
+
+def _matched_entry(rel: str | None, config: GuardConfig, include_dirs: bool) -> str | None:
+    """rel に当たった paths の項目を、理由に出す形で返す。当たらなければ None。
+
+    実際のパスは名前を含みうるので返さない。`X/**` の項目なら `X`、ほかは項目そのもの。
+    include_dirs なら `X/**` の `X` 自身にも当てる（Grep / Glob の検索先）。
+    """
+    if rel is None:
+        return None
+    for p in config.paths:
+        if p.endswith("/**") and (glob_match(p, rel) or (include_dirs and glob_match(p[:-3], rel))):
+            return p[:-3]
+    for p in config.paths:
+        if glob_match(p, rel):
+            return p
+    return None
+
+
+def _contains_protected_dir(rel: str | None, config: GuardConfig) -> bool:
+    """rel が、ある `X/**` の `X` の祖先（root を含む）か。root の外なら False。"""
     if rel is None:
         return False
-    if any(glob_match(p, rel) for p in config.paths):
-        return True
-    if include_dirs:
-        return any(p.endswith("/**") and glob_match(p[:-3], rel) for p in config.paths)
+    for p in config.paths:
+        if not p.endswith("/**"):
+            continue
+        segments = p[:-3].split("/")
+        for k in range(len(segments)):
+            prefix = "/".join(segments[:k])
+            if (rel == "") if k == 0 else glob_match(prefix, rel):
+                return True
     return False
+
+
+def _escapes_search_root(pattern: object) -> bool:
+    """glob が `..` の区切りを含むか、絶対パスか。"""
+    if not isinstance(pattern, str):
+        return False
+    s = pattern.replace("\\", "/")
+    return s.startswith("/") or re.match(r"[A-Za-z]:", s) is not None or ".." in s.split("/")
 
 
 def _matched_word(text: object, config: GuardConfig) -> str | None:
@@ -138,9 +182,9 @@ def decide(payload: dict, config: GuardConfig) -> str | None:
     if tool in FILE_TOOLS:
         target = tool_input.get(FILE_TOOLS[tool])
         if isinstance(target, str) and target:
-            rel = _relative(target, cwd, config)
-            if _protected_path(rel, config, include_dirs=False):
-                return REASON.format(rel)
+            entry = _matched_entry(_relative(target, cwd, config), config, include_dirs=False)
+            if entry is not None:
+                return REASON.format(entry)
         return None
 
     if tool in SEARCH_TOOLS:
@@ -148,8 +192,14 @@ def decide(payload: dict, config: GuardConfig) -> str | None:
         if not isinstance(target, str) or not target:
             target = cwd
         rel = _relative(target, cwd, config)
-        if _protected_path(rel, config, include_dirs=True):
-            return REASON.format(rel)
+        entry = _matched_entry(rel, config, include_dirs=True)
+        if entry is not None:
+            return REASON.format(entry)
+        if _contains_protected_dir(rel, config):
+            return SEARCH_ROOT_REASON
+        for key in ("pattern", "glob"):
+            if _escapes_search_root(tool_input.get(key)):
+                return PATTERN_REASON
         for key in ("pattern", "glob"):
             word = _matched_word(tool_input.get(key), config)
             if word is not None:
@@ -165,11 +215,7 @@ def decide(payload: dict, config: GuardConfig) -> str | None:
     return None
 
 
-def _deny(reason: str):
-    import sys
-
-    import typer
-
+def _deny(reason: str) -> NoReturn:
     # 受け手（Claude Code）が UTF-8 で読めるよう、コンソールのコードページを通さずに書く
     sys.stderr.flush()
     sys.stderr.buffer.write((reason + "\n").encode("utf-8"))
@@ -179,23 +225,27 @@ def _deny(reason: str):
 
 def guard_command():
     """Claude Code の PreToolUse フック。標準入力の JSON を見て、守られたファイルへの呼び出しを拒む。"""
-    import json
-    import sys
-
     try:
-        payload = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))
-    except (UnicodeDecodeError, ValueError):
-        _deny("jtk guard: 標準入力を JSON として読めません")
-    if not isinstance(payload, dict):
-        _deny("jtk guard: 標準入力を JSON として読めません")
+        reason = _judge(sys.stdin.buffer.read())
+    except Exception:
+        reason = UNDECIDABLE_REASON
+    if reason is not None:
+        _deny(reason)
 
+
+def _judge(data: bytes) -> str | None:
+    """標準入力の中身から、拒む理由か None を返す。判定できない入力は拒む。"""
+    try:
+        payload = json.loads(data.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError):
+        return BAD_INPUT_REASON
+    if not isinstance(payload, dict):
+        return BAD_INPUT_REASON
     cwd = payload.get("cwd")
     try:
         config = load_guard_config(Path(cwd) if isinstance(cwd, str) and cwd else Path.cwd())
     except JtkError as e:
-        _deny(str(e))
+        return str(e)
     if config is None:
-        return
-    reason = decide(payload, config)
-    if reason is not None:
-        _deny(reason)
+        return None
+    return decide(payload, config)
