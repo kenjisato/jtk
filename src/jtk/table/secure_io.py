@@ -13,7 +13,7 @@ from openpyxl import Workbook, load_workbook
 
 from jtk.errors import JtkError
 from jtk.table import Table
-from jtk.table.io import _build, _write_xlsx
+from jtk.table.io import _build, _read_xlsx, _write_xlsx
 
 
 class WrongPassword(JtkError):
@@ -59,15 +59,36 @@ def read_encrypted_xlsx(path: Path, password: str) -> Table:
         raise JtkError(f"{path.name} を表として読めません") from None
 
 
-def read_encrypted_workbook(path: Path, password: str) -> tuple[Table, Workbook]:
-    """1 回だけ復号し、同じ平文から 2 回読む。
+def is_encrypted(path: Path) -> bool:
+    """パスワード付きの Office ファイルなら True。読めない・Office でないなら False。"""
+    try:
+        with Path(path).open("rb") as fp:
+            return bool(msoffcrypto.OfficeFile(fp).is_encrypted())
+    except Exception:
+        return False
+
+
+def read_encrypted_table(path: Path, password: str) -> tuple[Table, list[str]]:
+    """read_table の暗号化版。最初のシートを値で読み、シートが複数なら警告を返す。"""
+    path = Path(path)
+    try:
+        return _read_xlsx(_decrypt(path, password))
+    except JtkError:
+        raise
+    except Exception:
+        raise JtkError(f"{path.name} を表として読めません") from None
+
+
+def read_workbook(path: Path, password: str | None) -> tuple[Table, Workbook]:
+    """xlsx を 1 回だけ（password があれば復号して）読み、同じ中身から 2 回開く。
 
     表（最初のシート）は値で読み、ブックは数式を残したまま返す。ブックを書き換えて
     write_encrypted_workbook に渡せば、ほかのシートや書式はそのまま残る。
+    password が None なら平文の xlsx として読む。
     """
     path = Path(path)
     try:
-        data = _decrypt(path, password).getvalue()
+        data = path.read_bytes() if password is None else _decrypt(path, password).getvalue()
         values = load_workbook(BytesIO(data), data_only=True)
         try:
             table = _first_sheet_table(values)

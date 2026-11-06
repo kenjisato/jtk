@@ -2,7 +2,7 @@
 
 jtk（十徳キット）は、授業・研究・学内事務で繰り返す操作を、コマンド 1 本にまとめる個人用の道具箱です。手作業をなくすことと、他の道具に埋もれていたスクリプトを、読んで試せるコードとして手元に置くことがねらいです。
 
-いまあるコマンドは、MS Forms の回答ファイルから、個人を特定できる情報（PII）を除いたコピーを作るものと、学生の対応表の ID を埋めるものです。除いたコピーを AI に渡して分析します。原本は教員と TA が採点に使います。
+いまあるコマンドは、MS Forms の回答ファイルから、個人を特定できる情報（PII）を除いたコピーを作るものです。同じ道具で、学生の対応表の ID の列も埋められます。除いたコピーを AI に渡して分析します。原本は教員と TA が採点に使います。
 
 ## インストール
 
@@ -16,7 +16,7 @@ PII の列を消したコピーを作ります。鍵は使いません。1 回�
 
 ```
 jtk table pii drop INPUT --out OUT [--config FILE] [--preset msforms]
-    [--pii COL ...] [--omit COL ...] [--move-original PATH] [--force]
+    [--pii COL ...] [--omit COL ...] [--move-original PATH] [--force] [--encrypt]
 ```
 
 | オプション | 内容 |
@@ -29,6 +29,7 @@ jtk table pii drop INPUT --out OUT [--config FILE] [--preset msforms]
 | `--omit COL` | 個人情報ではないが要らない列（複数可）。漏れの検査では探さない |
 | `--move-original PATH` | 書き終えた後に原本をそこへ移す。親フォルダは作る |
 | `--force` | 出力先・移し先に既にあるファイルを上書きする |
+| `--encrypt` | 出力をパスワード付きの .xlsx（Office 標準の暗号化）にする。下の「パスワード付きの .xlsx」を参照 |
 
 列名は見出しと完全に一致させます。見つからない列があればエラーです。`--pii` も `--omit` もプリセットも無ければ、何も消さないコピーを作る意味がないのでエラーです。
 
@@ -44,6 +45,7 @@ jtk table pii drop "03-2 確率の復習.xlsx" --preset msforms --omit ID --omit
 jtk table pii hash INPUT --scope SCOPE --out OUT [--config FILE]
     [--preset msforms] [--hash COL] [--hash-column NAME]
     [--pii COL ...] [--omit COL ...] [--move-original PATH] [--force]
+    [--encrypt] [--keep-pii]
 ```
 
 `pii drop` のオプションに加えて、次があります。
@@ -53,6 +55,7 @@ jtk table pii hash INPUT --scope SCOPE --out OUT [--config FILE]
 | `--scope` | ハッシュの範囲。必須で、既定値はない。例 `2026後期/経済数学I` |
 | `--hash COL` | ハッシュにする列。1 列だけ。`--preset msforms` ではメールの列 |
 | `--hash-column NAME` | ハッシュ列の名前。既定は `hash` |
+| `--keep-pii` | PII の列を消さず、漏れの検査もしない。`--encrypt` が要る。下の「対応表の ID を埋める（`--keep-pii`）」を参照 |
 
 `--preset msforms` では、メールの列が `--hash`、名前の列が `--pii` になります。ハッシュ列は、元の列があった位置に入ります。ハッシュにする列に空のセルがあるとエラーです。
 
@@ -72,36 +75,49 @@ jtk table pii hash "03-2 確率の復習.xlsx" --preset msforms --scope "2026後
 
 PC ごとに `jtk key fingerprint` を実行し、Bitwarden のメモの指紋と一致することを確かめてください。鍵が食い違うと、ハッシュ値が黙って食い違います。`jtk key new` の出力と `jtk key set` への入力は鍵を含むので、AI の会話の中では実行しないでください。
 
-## `jtk table roster fill`
+### パスワード付きの .xlsx
 
-学生の対応表（学年・姓・名・メールアドレス・別表記・呼称・ID の 7 列）の、ID が空の行を、メールアドレスのハッシュで埋めます。ハッシュは `pii hash` と同じ手順なので、同じスコープなら回答ファイルの `hash` 列と同じ値になります。対応表は、パスワードで暗号化した .xlsx です。
+`--encrypt` を付けると、出力をパスワード付きの .xlsx（Office 標準の暗号化。Excel で開ける）にします。`pii drop` と `pii hash` のどちらでも使えます。
+
+- 入力も出力も .xlsx のときだけ使えます。.csv なら止まります
+- パスワードは入力欄（画面に出ない）で受け取ります。引数・環境変数・設定ファイル・鍵保管庫では受け取りません。AI が同じ PC でファイルを開けないようにするためです
+- 入力が平文なら、パスワードを 2 回聞いて照合します。入力がパスワード付きなら、同じパスワードで暗号化します
+- 端末での実行が要ります。PowerShell か Windows Terminal で実行してください。Git Bash（mintty）や、Claude Code の Bash からは止まります
+- 平文はメモリの中だけに置きます。書き出しは、暗号化済みの中身を同じフォルダの一時ファイルに書き、置き換えます
+
+入力がパスワード付きの .xlsx なら、`--encrypt` が無くても、パスワードを聞いて開きます。このとき出力は平文です。
+
+### 対応表の ID を埋める（`--keep-pii`）
+
+学生の対応表のように、人も見る表に、AI とのやりとりに使うハッシュ値の列を作ります。名前やメールアドレスの列は残し、そのかわりファイル全体をパスワードで暗号化します。`--keep-pii` は `--encrypt` と組で使い、`--encrypt` が無ければ何もせずに止まります。
 
 ```
-jtk table roster fill ROSTER --scope SCOPE --danger
+jtk table pii hash student-ids.xlsx --scope Thesis --hash メールアドレス --hash-column ID     --keep-pii --encrypt --out student-ids.xlsx --force
 ```
 
-| オプション | 内容 |
-|---|---|
-| `ROSTER` | 暗号化された対応表。その場で上書き保存する |
-| `--scope` | ハッシュの範囲。必須で、既定値はない |
-| `--danger` | 対応表を開く危険な操作だと承知している印。無ければ何もせず止まる |
+- `--hash-column` の名前の列がすでにあれば、その列の空欄だけを埋めます。値が入っていて、メールアドレスから計算した値と食い違う行があれば、行番号だけを出して止まります
+- その列が無ければ、表の右端に足します。メールアドレスの列は残します
+- ブックを保ったまま、ハッシュのセルだけを書き換えます。ほかのシート・書式・数式・空行は残ります。ハッシュのセルは文字列として書きます
+- 埋める行が無ければ、ファイルを書き換えません
+- `--force` があるときに限り、`--out` を入力と同じファイルにできます。このとき `--move-original` は使えません
+- 列を消さないので、`--omit` は使えません
+- `--keep-pii` は設定ファイルには書けません。コマンドラインでだけ受け付けます
 
 実行の順番は次のとおりです。どこかで止まれば、ファイルは変わりません。
 
-1. `--danger` を確かめる
-2. 端末での実行かを確かめる。PowerShell か Windows Terminal で実行してください。Git Bash（mintty）や、Claude Code の Bash からは止まります
-3. 対応表が Claude Code のフックで守られているかを確かめる（次節）
-4. 確認として、ファイル名を打ち直す
-5. パスワードを入力欄（画面に出ない）で受け取り、対応表を開く
-6. ID を埋めて保存する。埋める行が無ければ、ファイルは書き直さない
+1. `--encrypt` があるかを確かめる
+2. 端末での実行かを確かめる
+3. 出力先が Claude Code のフックで守られているかを確かめる（次節）
+4. 確認として、出力先のファイル名を打ち直す
+5. パスワードを受け取り、表を開いて、ハッシュ値を埋めて保存する
 
-画面に出るのは、埋めた件数・埋めた ID・スコープ・親鍵の指紋だけです。姓・名・メールアドレスは出しません。ID が入っている行は、メールアドレスから計算した値と合うかを確かめます。メールアドレスの空欄や重なり、呼称の空欄や（同じ学年での）重なりがあれば、何も保存せずに止まります。
+画面に出るのは、件数・列名・スコープ・親鍵の指紋だけです。名前・メールアドレス・ハッシュ値は出しません。漏れの検査は「しませんでした（--keep-pii）」と出ます。
 
-対応表のパスワードは、親鍵とは別のものです。Bitwarden に別の項目として保存してください。
+ハッシュは `pii hash` のいつもの手順と同じなので、同じスコープなら回答ファイルの `hash` 列と同じ値になります。対応表のパスワードは、親鍵とは別のものです。Bitwarden に別の項目として保存してください。
 
 ## `jtk guard`
 
-AI（Claude Code）が対応表や原本のフォルダを読まないようにする、Claude Code の PreToolUse フックです。守るフォルダを `.claude/jtk-guard.toml` に書き、フックとして登録します。`roster fill` は、対応表がこのフックで守られていなければ動きません。
+AI（Claude Code）が対応表や原本のフォルダを読まないようにする、Claude Code の PreToolUse フックです。守るフォルダを `.claude/jtk-guard.toml` に書き、フックとして登録します。`pii hash --keep-pii` は、出力先がこのフックで守られていなければ動きません。
 
 ### 守るフォルダの設定
 
@@ -110,7 +126,7 @@ AI（Claude Code）が対応表や原本のフォルダを読まないように�
 ```toml
 [jtk.guard]
 paths = ["_inbox/**", "private/**"]
-command_words = ["_inbox", "private", "student-ids", ".docx", ".pdf", "--danger"]
+command_words = ["_inbox", "private", "student-ids", ".docx", ".pdf", "--keep-pii"]
 ```
 
 - `paths` は、守るファイルのパターンです。`.claude` のあるフォルダを起点に、`/` 区切りで書きます。`*` は 1 階層内、`**` は階層をまたぎます。Read / Edit / Write / MultiEdit / NotebookEdit が触るファイル、Grep / Glob の検索先がこれに当たると拒みます
@@ -140,7 +156,7 @@ command_words = ["_inbox", "private", "student-ids", ".docx", ".pdf", "--danger"
 }
 ```
 
-`settings.local.json` に書いても構いません。登録できているかは、`jtk table roster fill` が毎回、対応表への Read・Bash・Grep の呼び出しを模擬してフックに通し、拒まれることを確かめます。
+`settings.local.json` に書いても構いません。登録できているかは、`jtk table pii hash --keep-pii` が毎回、出力先への Read・Bash・Grep の呼び出しを模擬してフックに通し、拒まれることを確かめます。
 
 ### 限界
 

@@ -49,16 +49,21 @@ def _read_csv(path: Path) -> tuple[Table, list[str]]:
     return table, []
 
 
-def _read_xlsx(path: Path) -> tuple[Table, list[str]]:
+def sheet_warnings(wb: Workbook) -> list[str]:
+    if len(wb.worksheets) <= 1:
+        return []
+    return [
+        f"シートが {len(wb.worksheets)} 枚あります。"
+        f"最初のシート「{wb.worksheets[0].title}」だけを読みます"
+    ]
+
+
+def _read_xlsx(path) -> tuple[Table, list[str]]:
+    """path はファイルのパスか、平文の中身を持つ BytesIO。"""
     wb = load_workbook(path, data_only=True)
     try:
         ws = wb.worksheets[0]
-        warnings = []
-        if len(wb.worksheets) > 1:
-            warnings.append(
-                f"シートが {len(wb.worksheets)} 枚あります。"
-                f"最初のシート「{ws.title}」だけを読みます"
-            )
+        warnings = sheet_warnings(wb)
         table = _build(enumerate(ws.iter_rows(values_only=True), start=1))
         table.sheet_title = ws.title
     finally:

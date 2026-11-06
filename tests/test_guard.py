@@ -15,7 +15,7 @@ from jtk.guard import SEARCH_ROOT_REASON, GuardConfig, decide, glob_match, load_
 CONFIG_TOML = """\
 [jtk.guard]
 paths = ["private/**", "_inbox/**", "B25/**/*.docx", "B25/**/*.pdf", "M25/**/*.docx", "M25/**/*.pdf"]
-command_words = ["student-ids", "_inbox", "private/", "private\\\\", ".docx", ".pdf", "--danger"]
+command_words = ["student-ids", "_inbox", "private/", "private\\\\", ".docx", ".pdf", "--keep-pii"]
 """
 
 
@@ -76,9 +76,9 @@ def test_guard_denies_bash_cat(cfg):
     assert reason == "jtk guard: 守られたファイルです（student-ids）"
 
 
-def test_guard_denies_danger_flag(cfg):
-    reason = call("Bash", cfg, command="jtk table roster fill x --danger")
-    assert reason == "jtk guard: 守られたファイルです（--danger）"
+def test_guard_denies_keep_pii_flag(cfg):
+    reason = call("Bash", cfg, command="jtk table pii hash x.xlsx --keep-pii --encrypt")
+    assert reason == "jtk guard: 守られたファイルです（--keep-pii）"
 
 
 def test_guard_windows_paths_case_insensitive(cfg):
@@ -453,7 +453,7 @@ def readme_cfg(tmp_path):
 @pytest.mark.parametrize("command", [
     "ls _inbox",
     "cd private && ls",
-    "jtk table roster fill x --danger",
+    "jtk table pii hash ids.xlsx --keep-pii --encrypt",
     "cat private/student-ids.xlsx",
     "Get-ChildItem _INBOX",
 ])

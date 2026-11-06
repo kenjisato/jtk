@@ -143,3 +143,49 @@ def transform(
             ]
         )
     return Table(headers, rows, list(table.row_numbers), table.sheet_title)
+
+
+@dataclass
+class HashFill:
+    """--keep-pii のときに書くセル。column は 0 始まりの列の位置。"""
+
+    column: int
+    added: bool
+    cells: list[tuple[int, str]]  # (表計算ソフト上の行番号, hash の値)
+
+
+def _blank(value: object) -> bool:
+    return value is None or not str(value).strip()
+
+
+def plan_hash_fill(
+    table: Table, hash_col: str, hash_column: str, scope_key: bytes
+) -> HashFill:
+    """hash 列の空欄に入れる値を決める。表は変えない。
+
+    hash 列が無ければ右端に足す。値が入っていて計算した値と合わない行があれば止める。
+    """
+    if hash_column == hash_col:
+        raise JtkError(f"ハッシュ列の名前 {hash_column} がハッシュにする列と同じです")
+    count = table.headers.count(hash_column)
+    if count > 1:
+        raise JtkError(f"列 {hash_column} が見出しに複数あります")
+    hashes = _hash_cells(table, hash_col, scope_key)
+    if count == 0:
+        return HashFill(len(table.headers), True, list(zip(table.row_numbers, hashes)))
+
+    idx = table.headers.index(hash_column)
+    cells: list[tuple[int, str]] = []
+    mismatched: list[int] = []
+    for n, row, hashed in zip(table.row_numbers, table.rows, hashes):
+        value = row[idx]
+        if _blank(value):
+            cells.append((n, hashed))
+        elif str(value).strip() != hashed:
+            mismatched.append(n)
+    if mismatched:
+        raise JtkError(
+            f"列 {hash_column} の値が {hash_col} から計算した値と合いません"
+            f"（行 {_rows_text(mismatched)}）"
+        )
+    return HashFill(idx, False, cells)

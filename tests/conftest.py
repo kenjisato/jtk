@@ -114,27 +114,6 @@ def master_key(fake_keyring):
     fake_keyring.set_password("jtk", "master", MASTER_TEXT)
 
 
-ROSTER_HEADERS = ["学年", "姓", "名", "メールアドレス", "別表記", "呼称", "ID"]
-
-
-@pytest.fixture
-def roster_file(tmp_path):
-    from jtk.table import Table
-    from jtk.table.secure_io import write_encrypted_xlsx
-
-    table = Table(
-        headers=list(ROSTER_HEADERS),
-        rows=[
-            ["2026", "架空", "太郎", "taro@example.com", "かくう、Kakuu", "たろう", None],
-            ["2026", "例", "花子", "hanako@example.com", None, "はな", "abcd1234abcd1234"],
-        ],
-        row_numbers=[2, 3],
-    )
-    path = tmp_path / "roster.xlsx"
-    write_encrypted_xlsx(table, path, "pw")
-    return path
-
-
 GUARD_TOML = """\
 [jtk.guard]
 paths = ["private/**"]

@@ -3,18 +3,19 @@
 import errno
 import os
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
-from jtk import crypto, keys
-from jtk import roster as roster_mod
+from jtk import crypto, keys, prompt
 from jtk.errors import JtkError, exit_on_error
 from jtk.guard import verify_guard
-from jtk.table.io import read_table, write_table
+from jtk.table import Table, secure_io
+from jtk.table.io import read_table, sheet_warnings, write_table
 from jtk.table.leaks import collect_needles, find_leaks
-from jtk.table.pii import resolve_roles, transform
+from jtk.table.pii import HashFill, Roles, plan_hash_fill, resolve_roles, transform
 from jtk.table.settings import (
     PiiSettings,
     load_pii_settings,
@@ -25,8 +26,6 @@ from jtk.table.settings import (
 app = typer.Typer(help="表の道具", pretty_exceptions_enable=False)
 pii_app = typer.Typer(help="個人情報の列を消す・ハッシュに置き換える", pretty_exceptions_enable=False)
 app.add_typer(pii_app, name="pii")
-roster_app = typer.Typer(help="対応表（学生名簿）の道具", pretty_exceptions_enable=False)
-app.add_typer(roster_app, name="roster")
 
 Input = Annotated[Path, typer.Argument(metavar="INPUT", help="入力の表（.xlsx / .csv）")]
 Config = Annotated[Optional[Path], typer.Option("--config", help="設定ファイル（TOML）")]
@@ -36,19 +35,29 @@ Pii = Annotated[Optional[list[str]], typer.Option("--pii", help="消す個人情
 Omit = Annotated[Optional[list[str]], typer.Option("--omit", help="消すその他の列（複数可）")]
 MoveOriginal = Annotated[Optional[Path], typer.Option("--move-original", help="原本の移し先")]
 Force = Annotated[bool, typer.Option("--force", help="既存のファイルを上書きする")]
+Encrypt = Annotated[
+    bool, typer.Option("--encrypt", help="出力をパスワード付きの xlsx にする（パスワードは画面で入力）")
+]
 
 
 def _same(a: Path, b: Path) -> bool:
     return a.resolve() == b.resolve()
 
 
-def _check_paths(inp: Path, out: Path, moved: Path | None, force: bool) -> None:
+def _check_paths(
+    inp: Path, out: Path, moved: Path | None, force: bool, keep_pii: bool = False
+) -> None:
+    """keep_pii（--keep-pii --encrypt）で --force があるときに限り、--out を入力と同じにできる。"""
     if not inp.is_file():
         raise JtkError(f"入力 {inp.name} が見つかりません")
     if out.suffix.lower() != inp.suffix.lower():
         raise JtkError("--out の拡張子は入力と同じにしてください")
     if _same(out, inp):
-        raise JtkError("--out が入力と同じ場所です")
+        if not (keep_pii and force):
+            hint = "。上書きするなら --force を付けてください" if keep_pii else ""
+            raise JtkError(f"--out が入力と同じ場所です{hint}")
+        if moved is not None:
+            raise JtkError("--out を入力と同じにするときは、--move-original を使えません")
     if moved is not None:
         if _same(moved, inp):
             raise JtkError("--move-original が入力と同じ場所です")
@@ -60,11 +69,15 @@ def _check_paths(inp: Path, out: Path, moved: Path | None, force: bool) -> None:
         raise JtkError(f"{moved.name} がすでにあります。上書きするなら --force を付けてください")
 
 
-def _write_atomic(table, out: Path) -> None:
+def _make_parent(out: Path) -> None:
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         raise JtkError(f"{out.parent.name} を作れません") from None
+
+
+def _write_atomic(table, out: Path) -> None:
+    _make_parent(out)
     tmp = out.parent / f".{out.stem}.jtk-tmp{out.suffix}"
     try:
         try:
@@ -144,6 +157,51 @@ def _move_original(inp: Path, moved: Path, out: Path) -> None:
         ) from None
 
 
+def _confirm_keep_pii(out: Path) -> None:
+    """--keep-pii の守り。端末か、フックで守られているか、ファイル名の打ち直し。"""
+    prompt.require_tty()
+    failures = verify_guard(out)
+    if failures:
+        raise JtkError("\n".join(["出力先が Claude Code のフックで守られていません。", *failures]))
+    if typer.prompt(f"確認のため、出力先のファイル名 {out.name} を打ち直してください") != out.name:
+        raise JtkError("ファイル名が一致しません")
+
+
+def _keep_pii(
+    inp: Path,
+    out: Path,
+    moved: Path | None,
+    password: str,
+    encrypted_input: bool,
+    resolve: Callable[[list[str]], Roles],
+    scope_key: bytes,
+    hash_column: str,
+) -> tuple[Table, HashFill]:
+    """hash 列の空欄だけを埋め、ブックを保ったまま暗号化して書く。埋める行が無ければ書かない。"""
+    table, workbook = secure_io.read_workbook(inp, password if encrypted_input else None)
+    try:
+        for w in sheet_warnings(workbook):
+            typer.echo(w, err=True)
+        hash_col = resolve(table.headers).hash
+        fill = plan_hash_fill(table, hash_col, hash_column, scope_key)
+        if fill.cells:
+            ws = workbook.worksheets[0]
+            column = fill.column + 1
+            if fill.added:
+                header = ws.cell(row=1, column=column, value=hash_column)
+                header.data_type = "s"
+            for row, value in fill.cells:
+                cell = ws.cell(row=row, column=column, value=value)
+                cell.data_type = "s"
+            _make_parent(out)
+            secure_io.write_encrypted_workbook(workbook, out, password)
+    finally:
+        workbook.close()
+    if fill.cells and moved is not None:
+        _move_original(inp, moved, out)
+    return table, fill
+
+
 def _run(
     mode: str,
     inp: Path,
@@ -157,7 +215,13 @@ def _run(
     scope: str | None = None,
     hash_cols: list[str] | None = None,
     hash_column: str | None = None,
+    keep_pii: bool = False,
+    encrypt: bool = False,
 ) -> None:
+    if keep_pii and not encrypt:
+        raise JtkError(
+            "--keep-pii には --encrypt が要ります。個人情報を残すなら、出力を暗号化してください"
+        )
     settings = load_pii_settings(config) if config else PiiSettings()
     if out is None:
         if settings.out_dir is None:
@@ -175,21 +239,71 @@ def _run(
         hash_column = hash_column or settings.hash_column or "hash"
     else:
         hash_cols = []
+    if encrypt and (inp.suffix.lower() != ".xlsx" or out.suffix.lower() != ".xlsx"):
+        raise JtkError("--encrypt は .xlsx だけに使えます")
+    if keep_pii and omit_cols:
+        raise JtkError("--keep-pii では列を消しません。--omit は使えません")
 
-    _check_paths(inp, out, moved, force)
+    _check_paths(inp, out, moved, force, keep_pii=keep_pii)
+    if keep_pii:
+        _confirm_keep_pii(out)
+    elif encrypt:
+        prompt.require_tty()
 
     scope_key = master = None
     if mode == "hash":
         master = keys.load_master_key()
         scope_key = crypto.derive_scope_key(master, scope)
 
-    table, warnings = read_table(inp)
+    encrypted_input = inp.suffix.lower() == ".xlsx" and secure_io.is_encrypted(inp)
+    password = None
+    if encrypted_input:
+        password = prompt.prompt_password()
+    elif encrypt:
+        password = prompt.prompt_password(confirm=True)
+
+    def roles_for(headers):
+        return resolve_roles(
+            headers,
+            mode=mode,
+            preset=preset,
+            hash_cols=hash_cols,
+            pii=pii_cols,
+            omit=omit_cols,
+        )
+
+    if keep_pii:
+        table, fill = _keep_pii(
+            inp, out, moved, password, encrypted_input, roles_for, scope_key, hash_column
+        )
+        written = bool(fill.cells)
+        if written:
+            typer.echo(f"出力: {out}")
+            typer.echo("暗号化: しました")
+        else:
+            typer.echo("出力: 書き換えていません（埋める行がありません）")
+        typer.echo(f"行数: {len(table.rows)}")
+        typer.echo(f"埋めた件数: {len(fill.cells)} 件")
+        typer.echo("削除した列: なし")
+        if written and fill.added:
+            typer.echo(f"追加した列: {hash_column}")
+        typer.echo(f"スコープ: {scope}")
+        typer.echo(f"鍵の指紋: {crypto.fingerprint(master)}")
+        typer.echo("漏れの検査: しませんでした（--keep-pii）")
+        if written and moved is not None:
+            typer.echo(f"原本の移し先: {moved}")
+        if settings.source is not None:
+            typer.echo(f"設定ファイル: {settings.source}")
+        return
+
+    if encrypted_input:
+        table, warnings = secure_io.read_encrypted_table(inp, password)
+    else:
+        table, warnings = read_table(inp)
     for w in warnings:
         typer.echo(w, err=True)
 
-    roles = resolve_roles(
-        table.headers, mode=mode, preset=preset, hash_cols=hash_cols, pii=pii_cols, omit=omit_cols
-    )
+    roles = roles_for(table.headers)
     result = transform(table, roles, scope_key=scope_key, hash_column=hash_column or "hash")
 
     needles = collect_needles(table, roles)
@@ -201,12 +315,18 @@ def _run(
         lines.append("原本を直すか、その列を --omit で消してください。")
         raise JtkError("\n".join(lines))
 
-    _write_atomic(result, out)
+    if encrypt:
+        _make_parent(out)
+        secure_io.write_encrypted_xlsx(result, out, password)
+    else:
+        _write_atomic(result, out)
     if moved is not None:
         _move_original(inp, moved, out)
 
     removed = roles.pii + roles.omit
     typer.echo(f"出力: {out}")
+    if encrypt:
+        typer.echo("暗号化: しました")
     typer.echo(f"行数: {len(result.rows)}")
     typer.echo(f"削除した列: {', '.join(removed) if removed else 'なし'}")
     if mode == "hash":
@@ -231,9 +351,10 @@ def drop(
     omit: Omit = None,
     move_original: MoveOriginal = None,
     force: Force = False,
+    encrypt: Encrypt = False,
 ):
     """個人情報の列を消して書き出す。鍵は使わない。"""
-    _run("drop", input, config, out, preset, pii, omit, move_original, force)
+    _run("drop", input, config, out, preset, pii, omit, move_original, force, encrypt=encrypt)
 
 
 @pii_app.command()
@@ -250,33 +371,14 @@ def hash(
     scope: Annotated[Optional[str], typer.Option("--scope", help="ハッシュの範囲（例: 2026後期/授業名）")] = None,
     hash_: Annotated[Optional[list[str]], typer.Option("--hash", help="ハッシュにする列")] = None,
     hash_column: Annotated[Optional[str], typer.Option("--hash-column", help="ハッシュ列の名前（既定 hash）")] = None,
+    keep_pii: Annotated[
+        bool,
+        typer.Option("--keep-pii", help="個人情報の列を残し、hash 列の空欄を埋める（--encrypt が要る）"),
+    ] = False,
+    encrypt: Encrypt = False,
 ):
     """メールアドレスの列をハッシュに置き換え、個人情報の列を消して書き出す。"""
-    _run("hash", input, config, out, preset, pii, omit, move_original, force, scope, hash_, hash_column)
-
-
-@roster_app.command()
-@exit_on_error
-def fill(
-    roster: Annotated[Path, typer.Argument(metavar="ROSTER", help="暗号化された対応表（.xlsx）")],
-    scope: Annotated[str, typer.Option("--scope", help="ハッシュの範囲（例: 2026後期/授業名）")],
-    danger: Annotated[bool, typer.Option("--danger", help="対応表を開く危険な操作だと承知している")] = False,
-):
-    """対応表の ID の空欄を、メールアドレスのハッシュで埋めて上書き保存する。"""
-    if not danger:
-        raise JtkError("対応表を開く危険な操作です。意図して実行するなら --danger を付けてください")
-    roster_mod.require_tty()
-    failures = verify_guard(roster)
-    if failures:
-        raise JtkError("\n".join(["対応表が Claude Code のフックで守られていません。", *failures]))
-    if typer.prompt(f"確認のため、ファイル名 {roster.name} を打ち直してください") != roster.name:
-        raise JtkError("ファイル名が一致しません")
-    master = keys.load_master_key()
-    scope_key = crypto.derive_scope_key(master, scope)
-    password = roster_mod.prompt_password()
-    filled = roster_mod.fill_roster_file(roster, password, scope_key)
-    typer.echo(f"埋めた件数: {len(filled)} 件")
-    for id_ in filled:
-        typer.echo(f"  {id_}")
-    typer.echo(f"スコープ: {scope}")
-    typer.echo(f"鍵の指紋: {crypto.fingerprint(master)}")
+    _run(
+        "hash", input, config, out, preset, pii, omit, move_original, force, scope, hash_,
+        hash_column, keep_pii=keep_pii, encrypt=encrypt,
+    )
