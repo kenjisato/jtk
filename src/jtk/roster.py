@@ -5,9 +5,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from jtk.crypto import hash_email, normalize_email
 from jtk.errors import JtkError
 from jtk.table import Table
-from jtk.table.secure_io import read_encrypted_xlsx
+from jtk.table.secure_io import read_encrypted_xlsx, write_encrypted_xlsx
 
 COLUMNS = ["学年", "姓", "名", "メールアドレス", "別表記", "呼称", "ID"]
 
@@ -36,7 +37,11 @@ def roster_column_indices(headers: list[object]) -> dict[str, int]:
 
 
 def _text(value: object) -> str:
-    return "" if value is None else str(value).strip()
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
 
 
 def _split_variants(value: object) -> list[str]:
@@ -88,3 +93,44 @@ def prompt_password(confirm: bool = False) -> str:
     if confirm and getpass.getpass("対応表のパスワード（確認）: ") != password:
         raise JtkError("パスワードが一致しません")
     return password
+
+
+def fill_ids(table: Table, scope_key: bytes) -> list[str]:
+    """「ID」が空の行に ID を入れ、入れた ID を返す。検査に失敗したら表を変えない。"""
+    idx = roster_column_indices(table.headers)
+    students = students_from_table(table)
+    seen_emails: set[str] = set()
+    seen_aliases: set[tuple[str, str]] = set()
+    expected: list[str] = []
+    for s in students:
+        if not s.email:
+            raise JtkError(f"行 {s.row} のメールアドレスが空です")
+        normalized = normalize_email(s.email)
+        if normalized in seen_emails:
+            raise JtkError(f"行 {s.row} のメールアドレスが他の行と重なっています")
+        seen_emails.add(normalized)
+        computed = hash_email(scope_key, s.email)
+        if s.id and s.id != computed:
+            raise JtkError(f"行 {s.row} の ID がメールアドレスと合いません")
+        if not s.alias:
+            raise JtkError(f"行 {s.row} の呼称が空です")
+        if (s.cohort, s.alias) in seen_aliases:
+            raise JtkError(f"行 {s.row} の呼称が同じ学年の他の行と重なっています")
+        seen_aliases.add((s.cohort, s.alias))
+        expected.append(computed)
+
+    filled = []
+    id_col = idx["ID"]
+    for s, cells, computed in zip(students, table.rows, expected):
+        if s.id:
+            continue
+        while len(cells) <= id_col:
+            cells.append(None)
+        cells[id_col] = computed
+        filled.append(computed)
+    return filled
+
+
+def save_roster(table: Table, path: Path, password: str) -> None:
+    """対応表を暗号化して保存する。失敗しても元のファイルは変わらない。"""
+    write_encrypted_xlsx(table, path, password)
