@@ -16,7 +16,7 @@ from jtk.errors import JtkError
 from jtk.prompt import prompt_password, require_tty
 from jtk.table import Table
 from jtk.table import secure_io
-from jtk.table.io import write_table
+from jtk.table.io import read_table, write_table
 from jtk.table.secure_io import read_encrypted_xlsx, write_encrypted_xlsx
 
 runner = CliRunner()
@@ -529,4 +529,137 @@ def test_encrypted_input_wrong_password(guarded, passwords, tmp_path):
     r = runner.invoke(app, ["table", "pii", "drop", str(guarded), "--pii", "姓", "--out", str(out)])
     assert r.exit_code == 1
     assert "パスワードが違います" in r.output
+    assert not out.exists()
+
+
+# --- --index ---
+
+INDEX_HEADERS = ["学年", "姓", "名", "呼称", "メモ", "メールアドレス", "ID"]
+
+
+def index_rows(nick=("A", "B"), ids=(None, None)):
+    return [
+        ["2026", "架空", "太郎", nick[0], "m1", "taro@example.com", ids[0]],
+        ["2026", "例", "花子", nick[1], "m2", "hanako@example.com", ids[1]],
+    ]
+
+
+def make_index_source(project, nick=("A", "B"), ids=(None, None)):
+    return make_ids(
+        project / "private" / "student-ids.xlsx", headers=INDEX_HEADERS, data=index_rows(nick, ids)
+    )
+
+
+def keep_index(path, index, *extra, out=None):
+    return keep(path, "--pii", "姓", "--pii", "名", "--index", str(index), *extra, out=out)
+
+
+@pytest.mark.parametrize("suffix", [".xlsx", ".csv"])
+def test_index_has_id_only(project, master_key, passwords, tmp_path, suffix):
+    src = make_index_source(project)
+    index = tmp_path / f"ids{suffix}"
+    r = keep_index(src, index, "--omit", "メモ")
+    assert r.exit_code == 0, r.output
+    table = read_table(index)[0]
+    assert table.headers == ["学年", "呼称", "ID"]
+    assert table.rows == [
+        ["2026", "A", h("taro@example.com")],
+        ["2026", "B", h("hanako@example.com")],
+    ]
+    assert f"一覧: {index}" in r.output
+    assert "2" in r.output.split("一覧の行数:")[1].splitlines()[0]
+    assert_no_secrets(r.output)
+    # 対応表には残る
+    roster = read_encrypted_xlsx(src, "pw")
+    assert roster.headers == INDEX_HEADERS
+    assert [row[4] for row in roster.rows] == ["m1", "m2"]
+    assert index.read_bytes().find("架空".encode()) < 0
+
+
+def test_index_written_when_nothing_to_fill(project, master_key, passwords, tmp_path):
+    src = make_index_source(project, ids=(h("taro@example.com"), h("hanako@example.com")))
+    before = src.read_bytes()
+    index = tmp_path / "ids.csv"
+    r = keep_index(src, index, "--omit", "メモ")
+    assert r.exit_code == 0, r.output
+    assert "書き換えていません" in r.output
+    assert src.read_bytes() == before
+    assert read_table(index)[0].headers == ["学年", "呼称", "ID"]
+
+
+def test_index_leak_writes_nothing(project, master_key, passwords, tmp_path):
+    # 呼称にメールアドレスの @ より前（4 文字以上）が入っている
+    src = make_index_source(project, nick=("taro", "B"))
+    before = src.read_bytes()
+    index = tmp_path / "ids.xlsx"
+    r = keep_index(src, index, "--omit", "メモ")
+    assert r.exit_code == 1
+    assert "行 2 / 列 呼称" in r.output
+    assert_no_secrets(r.output)
+    assert src.read_bytes() == before
+    assert not index.exists()
+
+
+def test_omit_column_is_not_a_needle(project, master_key, passwords, tmp_path):
+    # 呼称と同じ値がメモにあっても、--omit の列は照合語にならない
+    src = make_ids(
+        project / "private" / "student-ids.xlsx",
+        headers=INDEX_HEADERS,
+        data=[["2026", "架空", "太郎", "ゆうきくん", "ゆうきくん", "taro@example.com", None]],
+    )
+    index = tmp_path / "ids.csv"
+    r = keep_index(src, index, "--omit", "メモ")
+    assert r.exit_code == 0, r.output
+    assert read_table(index)[0].rows[0][1] == "ゆうきくん"
+
+
+def test_index_requires_keep_pii(guarded, master_key, passwords, tmp_path):
+    index = tmp_path / "ids.xlsx"
+    args = ["table", "pii", "hash", str(guarded), "--scope", SCOPE, "--hash", "メールアドレス",
+            "--index", str(index), "--out", str(tmp_path / "o.xlsx")]
+    r = runner.invoke(app, args)
+    assert r.exit_code == 1
+    assert "--index" in r.output
+    assert passwords["calls"] == 0
+    assert not index.exists()
+
+
+def test_omit_without_index_still_stops(guarded, master_key, passwords):
+    r = keep(guarded, "--omit", "学年")
+    assert r.exit_code == 1
+    assert "--omit" in r.output
+
+
+def test_existing_index_needs_force(project, master_key, passwords, tmp_path):
+    src = make_index_source(project)
+    index = tmp_path / "ids.csv"
+    index.write_text("old", encoding="utf-8")
+    out = project / "private" / "out.xlsx"
+    args = ["table", "pii", "hash", str(src), "--scope", SCOPE, "--hash", "メールアドレス",
+            "--hash-column", "ID", "--pii", "姓", "--pii", "名", "--omit", "メモ",
+            "--keep-pii", "--encrypt", "--out", str(out), "--index", str(index)]
+    r = runner.invoke(app, args, input=f"{out.name}\n")
+    assert r.exit_code == 1
+    assert f"{index.name} がすでにあります" in r.output
+    assert passwords["calls"] == 0
+    assert index.read_text(encoding="utf-8") == "old"
+    assert not out.exists()
+
+
+def test_index_same_as_out_stops(project, master_key, passwords):
+    src = make_index_source(project)
+    before = src.read_bytes()
+    r = keep_index(src, src, "--omit", "メモ")
+    assert r.exit_code == 1
+    assert "--index" in r.output
+    assert src.read_bytes() == before
+    assert passwords["calls"] == 0
+
+
+def test_index_same_as_input_stops(project, master_key, passwords):
+    src = make_index_source(project)
+    out = project / "private" / "out.xlsx"
+    r = keep_index(src, src, "--omit", "メモ", out=out)
+    assert r.exit_code == 1
+    assert "--index" in r.output
     assert not out.exists()

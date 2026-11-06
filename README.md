@@ -45,7 +45,7 @@ jtk table pii drop "03-2 確率の復習.xlsx" --preset msforms --omit ID --omit
 jtk table pii hash INPUT --scope SCOPE --out OUT [--config FILE]
     [--preset msforms] [--hash COL] [--hash-column NAME]
     [--pii COL ...] [--omit COL ...] [--move-original PATH] [--force]
-    [--encrypt] [--keep-pii]
+    [--encrypt] [--keep-pii] [--index PATH]
 ```
 
 `pii drop` のオプションに加えて、次があります。
@@ -56,6 +56,7 @@ jtk table pii hash INPUT --scope SCOPE --out OUT [--config FILE]
 | `--hash COL` | ハッシュにする列。1 列だけ。`--preset msforms` ではメールの列 |
 | `--hash-column NAME` | ハッシュ列の名前。既定は `hash` |
 | `--keep-pii` | PII の列を消さず、漏れの検査もしない。`--encrypt` が要る。下の「対応表の ID を埋める（`--keep-pii`）」を参照 |
+| `--index PATH` | `--keep-pii` のときだけ。名前とメールアドレスの列を消した ID の一覧も書き出す。下の「ID の一覧（`--index`）」を参照 |
 
 `--preset msforms` では、メールの列が `--hash`、名前の列が `--pii` になります。ハッシュ列は、元の列があった位置に入ります。ハッシュにする列に空のセルがあるとエラーです。
 
@@ -101,7 +102,7 @@ jtk table pii hash student-ids.xlsx --scope Thesis --hash メールアドレス 
 - ブックを保ったまま、ハッシュのセルだけを書き換えます。ほかのシート・書式・数式・空行は残ります。ハッシュのセルは文字列として書きます
 - 入力と同じファイルに書くとき、埋める行が無く、入力がすでにパスワード付きなら、ファイルを書き換えません。それ以外は、埋める行が無くても暗号化して書き出します（平文の入力は暗号化され、別の `--out` には出力ができます）
 - `--force` があるときに限り、`--out` を入力と同じファイルにできます。このとき `--move-original` は使えません
-- 列を消さないので、`--omit` は使えません
+- 対応表の列は消さないので、`--omit` は `--index` があるときだけ使えます（一覧からだけ消します）
 - `--keep-pii` は設定ファイルには書けません。コマンドラインでだけ受け付けます
 
 実行の順番は次のとおりです。どこかで止まれば、ファイルは変わりません。
@@ -115,6 +116,26 @@ jtk table pii hash student-ids.xlsx --scope Thesis --hash メールアドレス 
 画面に出るのは、件数・列名・スコープ・親鍵の指紋だけです。名前・メールアドレス・ハッシュ値は出しません。漏れの検査は「しませんでした（--keep-pii）」と出ます。
 
 ハッシュは `pii hash` のいつもの手順と同じなので、同じスコープなら回答ファイルの `hash` 列と同じ値になります。対応表のパスワードは、親鍵とは別のものです。Bitwarden に別の項目として保存してください。
+
+### ID の一覧（`--index`）
+
+AI（Claude Code）が知る必要があるのは ID だけで、ID と氏名の対応は要りません。`--index` を付けると、対応表と一緒に、名前を消した一覧を書き出します。Claude には対応表ではなく、この一覧を読ませてください。
+
+```
+jtk table pii hash private\student-ids.xlsx --scope Thesis --hash メールアドレス --hash-column ID \
+    --pii 姓 --pii 名 --pii 別表記 --omit メモ --keep-pii --encrypt --out private\student-ids.xlsx --force \
+    --index ids.xlsx
+```
+
+- 一覧は、ID を埋めた後の表から、`--pii` の列と `--hash` の列（メールアドレス）と `--omit` の列を消したものです。上の例なら `学年, 呼称, ID` のような表になります。パスワードは付けず、形式は拡張子（`.xlsx` / `.csv`）で決めます
+- `--omit` の列は一覧からだけ消し、対応表には残します。`--pii` と違って、漏れの検査では探しません。メモの列など、個人情報ではないが一覧に要らない列に使います
+- 一覧には `pii drop` と同じ漏れの検査をかけます。漏れがあれば、対応表も一覧も書かずに止まります
+- 埋める行が無く対応表を書き換えないときも、一覧は書きます
+- 一覧がすでにあれば `--force` が要ります。入力や `--out` と同じ場所は指定できません
+- 書く順番は、検査がすべて済んでから対応表、その後に一覧です
+- 一覧は、Claude Code のフックで守るフォルダ（`private` など）の外に置いてください。守るフォルダの中では Claude が読めません
+
+画面には、一覧の場所と行数だけを出します。
 
 ## `jtk guard`
 

@@ -45,7 +45,12 @@ def _same(a: Path, b: Path) -> bool:
 
 
 def _check_paths(
-    inp: Path, out: Path, moved: Path | None, force: bool, keep_pii: bool = False
+    inp: Path,
+    out: Path,
+    moved: Path | None,
+    force: bool,
+    keep_pii: bool = False,
+    index: Path | None = None,
 ) -> None:
     """keep_pii（--keep-pii --encrypt）で --force があるときに限り、--out を入力と同じにできる。"""
     if not inp.is_file():
@@ -67,6 +72,17 @@ def _check_paths(
         raise JtkError(f"{out.name} がすでにあります。上書きするなら --force を付けてください")
     if moved is not None and moved.exists() and not force:
         raise JtkError(f"{moved.name} がすでにあります。上書きするなら --force を付けてください")
+    if index is not None:
+        if index.suffix.lower() not in (".xlsx", ".csv"):
+            raise JtkError("--index の拡張子は .xlsx か .csv にしてください")
+        if _same(index, inp):
+            raise JtkError("--index が入力と同じ場所です")
+        if _same(index, out):
+            raise JtkError("--index が --out と同じ場所です")
+        if moved is not None and _same(index, moved):
+            raise JtkError("--index が --move-original と同じ場所です")
+        if index.exists() and not force:
+            raise JtkError(f"{index.name} がすでにあります。上書きするなら --force を付けてください")
 
 
 def _make_parent(out: Path) -> None:
@@ -167,6 +183,37 @@ def _confirm_keep_pii(out: Path) -> None:
         raise JtkError("ファイル名が一致しません")
 
 
+def _build_index(table: Table, fill: HashFill, roles: Roles, hash_column: str) -> Table:
+    """ID を埋めた後の表から、--pii・--hash・--omit の列を消した一覧を作る。"""
+    headers = list(table.headers)
+    rows = [list(r) for r in table.rows]
+    if fill.added:
+        headers.append(hash_column)
+        for r in rows:
+            r.append("")
+    position = {n: i for i, n in enumerate(table.row_numbers)}
+    for number, value in fill.cells:
+        rows[position[number]][fill.column] = value
+    dropped = set(roles.pii + roles.omit + ([roles.hash] if roles.hash else []))
+    keep = [i for i, name in enumerate(headers) if name not in dropped]
+    return Table(
+        [headers[i] for i in keep],
+        [[r[i] for i in keep] for r in rows],
+        list(table.row_numbers),
+        table.sheet_title,
+    )
+
+
+def _check_index_leaks(index_table: Table, original: Table, roles: Roles, hash_column: str) -> None:
+    """照合語は --pii と --hash の列だけ。--omit の列は含めない。"""
+    leaks = find_leaks(index_table, collect_needles(original, roles), {hash_column})
+    if leaks:
+        lines = ["一覧に個人情報が残っています。対応表も一覧も書き出していません。"]
+        lines += [f"行 {lk.row} / 列 {lk.column} / {lk.kind}" for lk in leaks]
+        lines.append("原本を直すか、その列を --pii か --omit で消してください。")
+        raise JtkError("\n".join(lines))
+
+
 def _keep_pii(
     inp: Path,
     out: Path,
@@ -176,11 +223,14 @@ def _keep_pii(
     resolve: Callable[[list[str]], Roles],
     scope_key: bytes,
     hash_column: str,
-) -> tuple[Table, HashFill, bool]:
+    index: Path | None = None,
+) -> tuple[Table, HashFill, bool, int | None]:
     """hash 列の空欄だけを埋め、ブックを保ったまま暗号化して書く。書いたかどうかも返す。
 
     書かないのは、埋める行が無く、入力と同じファイルへ書き、入力がすでに暗号化済みのときだけ。
+    index があれば、検査がすべて済んでから対応表、その後に一覧を書く。一覧の行数も返す。
     """
+    index_table = None
     table, workbook = secure_io.read_workbook(inp, password if encrypted_input else None)
     try:
         for w in sheet_warnings(workbook):
@@ -189,6 +239,9 @@ def _keep_pii(
         if hash_column in roles.pii:
             raise JtkError(f"ハッシュ列の名前 {hash_column} が --pii の列と同じです")
         fill = plan_hash_fill(table, roles.hash, hash_column, scope_key)
+        if index is not None:
+            index_table = _build_index(table, fill, roles, hash_column)
+            _check_index_leaks(index_table, table, roles, hash_column)
         write = bool(fill.cells) or not (encrypted_input and _same(out, inp))
         if write:
             ws = workbook.worksheets[0]
@@ -201,11 +254,13 @@ def _keep_pii(
                 cell.data_type = "s"
             _make_parent(out)
             secure_io.write_encrypted_workbook(workbook, out, password)
+        if index_table is not None:
+            _write_atomic(index_table, index)
     finally:
         workbook.close()
     if write and moved is not None:
         _move_original(inp, moved, out)
-    return table, fill, write
+    return table, fill, write, (len(index_table.rows) if index_table is not None else None)
 
 
 def _run(
@@ -223,7 +278,10 @@ def _run(
     hash_column: str | None = None,
     keep_pii: bool = False,
     encrypt: bool = False,
+    index: Path | None = None,
 ) -> None:
+    if index is not None and not keep_pii:
+        raise JtkError("--index は --keep-pii のときだけ使えます")
     if keep_pii and not encrypt:
         raise JtkError(
             "--keep-pii には --encrypt が要ります。個人情報を残すなら、出力を暗号化してください"
@@ -247,10 +305,10 @@ def _run(
         hash_cols = []
     if encrypt and (inp.suffix.lower() != ".xlsx" or out.suffix.lower() != ".xlsx"):
         raise JtkError("--encrypt は .xlsx だけに使えます")
-    if keep_pii and omit_cols:
-        raise JtkError("--keep-pii では列を消しません。--omit は使えません")
+    if keep_pii and omit_cols and index is None:
+        raise JtkError("--keep-pii では列を消しません。--omit は --index と一緒のときだけ使えます")
 
-    _check_paths(inp, out, moved, force, keep_pii=keep_pii)
+    _check_paths(inp, out, moved, force, keep_pii=keep_pii, index=index)
     if keep_pii:
         _confirm_keep_pii(out)
     elif encrypt:
@@ -279,8 +337,8 @@ def _run(
         )
 
     if keep_pii:
-        table, fill, written = _keep_pii(
-            inp, out, moved, password, encrypted_input, roles_for, scope_key, hash_column
+        table, fill, written, index_rows = _keep_pii(
+            inp, out, moved, password, encrypted_input, roles_for, scope_key, hash_column, index
         )
         if written:
             typer.echo(f"出力: {out}")
@@ -294,6 +352,10 @@ def _run(
             typer.echo(f"追加した列: {hash_column}")
         typer.echo(f"スコープ: {scope}")
         typer.echo(f"鍵の指紋: {crypto.fingerprint(master)}")
+        if index_rows is not None:
+            typer.echo(f"一覧: {index}")
+            typer.echo(f"一覧の行数: {index_rows}")
+            typer.echo("一覧の漏れの検査: 問題なし")
         typer.echo("漏れの検査: しませんでした（--keep-pii）")
         if written and moved is not None:
             typer.echo(f"原本の移し先: {moved}")
@@ -381,9 +443,13 @@ def hash(
         typer.Option("--keep-pii", help="個人情報の列を残し、hash 列の空欄を埋める（--encrypt が要る）"),
     ] = False,
     encrypt: Encrypt = False,
+    index: Annotated[
+        Optional[Path],
+        typer.Option("--index", help="ID の一覧の出力先（--keep-pii のときだけ。名前の列を消した表）"),
+    ] = None,
 ):
     """メールアドレスの列をハッシュに置き換え、個人情報の列を消して書き出す。"""
     _run(
         "hash", input, config, out, preset, pii, omit, move_original, force, scope, hash_,
-        hash_column, keep_pii=keep_pii, encrypt=encrypt,
+        hash_column, keep_pii=keep_pii, encrypt=encrypt, index=index,
     )
