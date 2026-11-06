@@ -176,15 +176,21 @@ def _keep_pii(
     resolve: Callable[[list[str]], Roles],
     scope_key: bytes,
     hash_column: str,
-) -> tuple[Table, HashFill]:
-    """hash 列の空欄だけを埋め、ブックを保ったまま暗号化して書く。埋める行が無ければ書かない。"""
+) -> tuple[Table, HashFill, bool]:
+    """hash 列の空欄だけを埋め、ブックを保ったまま暗号化して書く。書いたかどうかも返す。
+
+    書かないのは、埋める行が無く、入力と同じファイルへ書き、入力がすでに暗号化済みのときだけ。
+    """
     table, workbook = secure_io.read_workbook(inp, password if encrypted_input else None)
     try:
         for w in sheet_warnings(workbook):
             typer.echo(w, err=True)
-        hash_col = resolve(table.headers).hash
-        fill = plan_hash_fill(table, hash_col, hash_column, scope_key)
-        if fill.cells:
+        roles = resolve(table.headers)
+        if hash_column in roles.pii:
+            raise JtkError(f"ハッシュ列の名前 {hash_column} が --pii の列と同じです")
+        fill = plan_hash_fill(table, roles.hash, hash_column, scope_key)
+        write = bool(fill.cells) or not (encrypted_input and _same(out, inp))
+        if write:
             ws = workbook.worksheets[0]
             column = fill.column + 1
             if fill.added:
@@ -197,9 +203,9 @@ def _keep_pii(
             secure_io.write_encrypted_workbook(workbook, out, password)
     finally:
         workbook.close()
-    if fill.cells and moved is not None:
+    if write and moved is not None:
         _move_original(inp, moved, out)
-    return table, fill
+    return table, fill, write
 
 
 def _run(
@@ -273,10 +279,9 @@ def _run(
         )
 
     if keep_pii:
-        table, fill = _keep_pii(
+        table, fill, written = _keep_pii(
             inp, out, moved, password, encrypted_input, roles_for, scope_key, hash_column
         )
-        written = bool(fill.cells)
         if written:
             typer.echo(f"出力: {out}")
             typer.echo("暗号化: しました")

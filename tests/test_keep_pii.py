@@ -15,6 +15,7 @@ from jtk.cli import app
 from jtk.errors import JtkError
 from jtk.prompt import prompt_password, require_tty
 from jtk.table import Table
+from jtk.table import secure_io
 from jtk.table.io import write_table
 from jtk.table.secure_io import read_encrypted_xlsx, write_encrypted_xlsx
 
@@ -164,6 +165,7 @@ def test_keep_pii_stops_when_name_differs(guarded, master_key, passwords):
     before = guarded.read_bytes()
     r = keep(guarded, input_text="other.xlsx\n")
     assert r.exit_code == 1
+    assert "ファイル名が一致しません" in r.output
     assert guarded.read_bytes() == before
     assert passwords["calls"] == 0
 
@@ -183,6 +185,7 @@ def test_keep_pii_is_not_a_config_key(guarded, master_key, passwords, tmp_path):
     before = guarded.read_bytes()
     r = keep(guarded, "--config", cfg)
     assert r.exit_code == 1
+    assert "知らないキー keep_pii" in r.output
     assert guarded.read_bytes() == before
 
 
@@ -276,7 +279,63 @@ def test_nothing_to_fill_keeps_file(guarded, master_key, passwords):
     r = keep(guarded)
     assert r.exit_code == 0, r.output
     assert "埋めた件数: 0 件" in r.output
+    assert "書き換えていません" in r.output
+    assert "暗号化: しました" not in r.output
     assert guarded.read_bytes() == before
+
+
+def filled_rows():
+    return rows((h("taro@example.com"), h("hanako@example.com")))
+
+
+def test_nothing_to_fill_still_writes_other_out(project, master_key, passwords):
+    src = make_ids(project / "private" / "src.xlsx", data=filled_rows())
+    out = project / "private" / "out.xlsx"
+    r = keep(src, out=out)
+    assert r.exit_code == 0, r.output
+    assert "埋めた件数: 0 件" in r.output
+    assert f"出力: {out}" in r.output
+    assert "暗号化: しました" in r.output
+    assert ids_of(out) == [h("taro@example.com"), h("hanako@example.com")]
+    assert src.exists()
+
+
+def test_nothing_to_fill_other_out_moves_original(project, master_key, passwords):
+    src = make_ids(project / "private" / "src.xlsx", data=filled_rows())
+    out = project / "private" / "out.xlsx"
+    moved = project / "private" / "old" / "src.xlsx"
+    r = keep(src, "--move-original", moved, out=out)
+    assert r.exit_code == 0, r.output
+    assert ids_of(out) == [h("taro@example.com"), h("hanako@example.com")]
+    assert not src.exists() and moved.exists()
+    assert f"原本の移し先: {moved}" in r.output
+
+
+def test_plain_input_in_place_gets_encrypted(project, master_key, passwords):
+    path = make_ids(project / "private" / "ids.xlsx", data=filled_rows(), password=None)
+    passwords["answers"] = ["new", "new"]
+    r = keep(path)
+    assert r.exit_code == 0, r.output
+    assert "埋めた件数: 0 件" in r.output
+    assert "暗号化: しました" in r.output
+    assert secure_io.is_encrypted(path)
+    assert ids_of(path, password="new") == [h("taro@example.com"), h("hanako@example.com")]
+
+
+def test_keep_pii_moves_original_to_other_out(project, master_key, passwords):
+    src = make_ids(project / "private" / "src.xlsx")
+    out = project / "private" / "out.xlsx"
+    moved = project / "private" / "old" / "src.xlsx"
+    r = keep(src, "--move-original", moved, out=out)
+    assert r.exit_code == 0, r.output
+    assert secure_io.is_encrypted(out)
+    assert ids_of(out) == [h("taro@example.com"), h("hanako@example.com")]
+    assert not src.exists()
+    assert read_encrypted_xlsx(moved, "pw").rows == read_encrypted_xlsx(
+        make_ids(project / "private" / "ref.xlsx"), "pw"
+    ).rows
+    assert f"原本の移し先: {moved}" in r.output
+    assert "埋めた件数: 2 件" in r.output
 
 
 def test_missing_column_is_added_at_right_end(project, master_key, passwords):
@@ -297,6 +356,16 @@ def test_hash_column_same_as_email_column_stops(guarded, master_key, passwords):
             "--force"]
     r = runner.invoke(app, args, input=f"{guarded.name}\n")
     assert r.exit_code == 1
+    assert "ハッシュにする列と同じです" in r.output
+    assert guarded.read_bytes() == before
+
+
+def test_hash_column_same_as_pii_column_stops(guarded, master_key, passwords):
+    before = guarded.read_bytes()
+    r = keep(guarded, "--pii", "ID")
+    assert r.exit_code == 1
+    assert "ハッシュ列の名前 ID が --pii の列と同じです" in r.output
+    assert_no_secrets(r.output)
     assert guarded.read_bytes() == before
 
 

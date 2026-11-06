@@ -1,4 +1,5 @@
 import csv
+from io import BytesIO
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -58,7 +59,7 @@ def sheet_warnings(wb: Workbook) -> list[str]:
     ]
 
 
-def _read_xlsx(path) -> tuple[Table, list[str]]:
+def _read_xlsx(path: Path | BytesIO) -> tuple[Table, list[str]]:
     """path はファイルのパスか、平文の中身を持つ BytesIO。"""
     wb = load_workbook(path, data_only=True)
     try:

@@ -92,13 +92,14 @@ PC ごとに `jtk key fingerprint` を実行し、Bitwarden のメモの指紋�
 学生の対応表のように、人も見る表に、AI とのやりとりに使うハッシュ値の列を作ります。名前やメールアドレスの列は残し、そのかわりファイル全体をパスワードで暗号化します。`--keep-pii` は `--encrypt` と組で使い、`--encrypt` が無ければ何もせずに止まります。
 
 ```
-jtk table pii hash student-ids.xlsx --scope Thesis --hash メールアドレス --hash-column ID     --keep-pii --encrypt --out student-ids.xlsx --force
+jtk table pii hash student-ids.xlsx --scope Thesis --hash メールアドレス --hash-column ID \
+    --keep-pii --encrypt --out student-ids.xlsx --force
 ```
 
 - `--hash-column` の名前の列がすでにあれば、その列の空欄だけを埋めます。値が入っていて、メールアドレスから計算した値と食い違う行があれば、行番号だけを出して止まります
 - その列が無ければ、表の右端に足します。メールアドレスの列は残します
 - ブックを保ったまま、ハッシュのセルだけを書き換えます。ほかのシート・書式・数式・空行は残ります。ハッシュのセルは文字列として書きます
-- 埋める行が無ければ、ファイルを書き換えません
+- 入力と同じファイルに書くとき、埋める行が無く、入力がすでにパスワード付きなら、ファイルを書き換えません。それ以外は、埋める行が無くても暗号化して書き出します（平文の入力は暗号化され、別の `--out` には出力ができます）
 - `--force` があるときに限り、`--out` を入力と同じファイルにできます。このとき `--move-original` は使えません
 - 列を消さないので、`--omit` は使えません
 - `--keep-pii` は設定ファイルには書けません。コマンドラインでだけ受け付けます
